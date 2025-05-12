@@ -1,4 +1,5 @@
 use std::{
+    marker::PhantomData,
     sync::Arc,
     time::{Duration, SystemTime},
 };
@@ -37,7 +38,11 @@ use reth_tracing::{
     tracing::{self, level_filters::LevelFilter},
     LayerInfo, LogFormat, RethTracer, Tracer,
 };
-use reth_transaction_pool::blobstore::{DiskFileBlobStore, DiskFileBlobStoreConfig};
+use reth_transaction_pool::{
+    blobstore::{DiskFileBlobStore, DiskFileBlobStoreConfig},
+    CoinbaseTipOrdering, EthPooledTransaction, EthTransactionValidator, Pool, PoolTransaction,
+    Priority, TransactionOrdering,
+};
 use reth_trie_db::MerklePatriciaTrie;
 use tracing::{debug, info};
 
@@ -359,7 +364,13 @@ where
     >,
     Node: FullNodeTypes<Types = Types>,
 {
-    type Pool = EthTransactionPool<Node::Provider, DiskFileBlobStore>;
+    type Pool = Pool<
+        TransactionValidationTaskExecutor<
+            EthTransactionValidator<Node::Provider, EthPooledTransaction>,
+        >,
+        SystemTxsCoinbaseTipOrdering<EthPooledTransaction>,
+        DiskFileBlobStore,
+    >;
 
     async fn build_pool(self, ctx: &BuilderContext<Node>) -> eyre::Result<Self::Pool> {
         let data_dir = ctx.config().datadir();
@@ -394,8 +405,9 @@ where
             .with_additional_tasks(ctx.config().txpool.additional_validation_tasks)
             .build_with_tasks(ctx.task_executor().clone(), blob_store.clone());
 
+        let ordering = SystemTxsCoinbaseTipOrdering::default();
         let transaction_pool =
-            reth_transaction_pool::Pool::eth_pool(validator, blob_store, pool_config);
+            reth_transaction_pool::Pool::new(validator, ordering, blob_store, pool_config);
         info!(target: "reth::cli", "Transaction pool initialized");
 
         // spawn txpool maintenance task
@@ -450,5 +462,43 @@ where
         }
 
         Ok(transaction_pool)
+    }
+}
+
+/// System txs go to the top
+/// The transactions are ordered by their coinbase tip.
+/// The higher the coinbase tip is, the higher the priority of the transaction.
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct SystemTxsCoinbaseTipOrdering<T>(PhantomData<T>);
+
+impl<T> TransactionOrdering for SystemTxsCoinbaseTipOrdering<T>
+where
+    T: PoolTransaction + 'static,
+{
+    type PriorityValue = U256;
+    type Transaction = T;
+
+    /// Source: <https://github.com/ethereum/go-ethereum/blob/7f756dc1185d7f1eeeacb1d12341606b7135f9ea/core/txpool/legacypool/list.go#L469-L482>.
+    ///
+    /// NOTE: The implementation is incomplete for missing base fee.
+    fn priority(
+        &self,
+        transaction: &Self::Transaction,
+        base_fee: u64,
+    ) -> Priority<Self::PriorityValue> {
+        transaction.effective_tip_per_gas(base_fee).map(U256::from).into()
+    }
+}
+
+impl<T> Default for SystemTxsCoinbaseTipOrdering<T> {
+    fn default() -> Self {
+        Self(Default::default())
+    }
+}
+
+impl<T> Clone for SystemTxsCoinbaseTipOrdering<T> {
+    fn clone(&self) -> Self {
+        Self::default()
     }
 }

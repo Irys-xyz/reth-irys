@@ -1,27 +1,35 @@
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::Arc,
+    time::{Duration, SystemTime},
+};
 
-use alloy_eips::Encodable2718;
+use alloy_eips::{eip7840::BlobParams, merge::EPOCH_SLOTS, Encodable2718};
 use alloy_genesis::Genesis;
 use alloy_primitives::{Address, TxKind, B256, U256};
 use alloy_rpc_types::{engine::PayloadAttributes, TransactionInput, TransactionRequest};
 use reth::{
-    api::{FullNodeComponents, FullNodeTypes, NodeTypes, PayloadTypes},
+    api::{FullNodeComponents, FullNodeTypes, NodePrimitives, NodeTypes, PayloadTypes},
     builder::{
-        components::{BasicPayloadServiceBuilder, ComponentsBuilder},
-        DebugNode, Node, NodeAdapter, NodeComponentsBuilder,
+        components::{BasicPayloadServiceBuilder, ComponentsBuilder, PoolBuilder},
+        BuilderContext, DebugNode, Node, NodeAdapter, NodeComponentsBuilder,
     },
     payload::{EthBuiltPayload, EthPayloadBuilderAttributes},
     primitives::EthPrimitives,
     providers::{providers::ProviderFactoryBuilder, CanonStateSubscriptions, EthStorage},
+    transaction_pool::{
+        blobstore::InMemoryBlobStore, EthTransactionPool, PoolConfig,
+        TransactionValidationTaskExecutor,
+    },
 };
-use reth_chainspec::ChainSpec;
+use reth_chainspec::{ChainSpec, EthChainSpec, EthereumHardforks};
 use reth_e2e_test_utils::{setup, transaction::TransactionTestContext};
 use reth_ethereum_engine_primitives::EthPayloadAttributes;
+use reth_ethereum_primitives::TransactionSigned;
 use reth_network::NetworkEventListenerProvider;
 use reth_node_ethereum::{
     node::{
         EthereumAddOns, EthereumConsensusBuilder, EthereumExecutorBuilder, EthereumNetworkBuilder,
-        EthereumPayloadBuilder, EthereumPoolBuilder,
+        EthereumPayloadBuilder,
     },
     EthEngineTypes, EthereumNode,
 };
@@ -29,7 +37,9 @@ use reth_tracing::{
     tracing::{self, level_filters::LevelFilter},
     LayerInfo, LogFormat, RethTracer, Tracer,
 };
+use reth_transaction_pool::blobstore::{DiskFileBlobStore, DiskFileBlobStoreConfig};
 use reth_trie_db::MerklePatriciaTrie;
+use tracing::{debug, info};
 
 pub(crate) fn eth_payload_attributes(timestamp: u64) -> EthPayloadBuilderAttributes {
     let attributes = PayloadAttributes {
@@ -260,7 +270,7 @@ impl IrysEthereumNode {
     /// Returns a [`ComponentsBuilder`] configured for a regular Ethereum node.
     pub fn components<Node>() -> ComponentsBuilder<
         Node,
-        EthereumPoolBuilder,
+        CustomPoolBuilder,
         BasicPayloadServiceBuilder<EthereumPayloadBuilder>,
         EthereumNetworkBuilder,
         EthereumExecutorBuilder,
@@ -276,7 +286,7 @@ impl IrysEthereumNode {
     {
         ComponentsBuilder::default()
             .node_types::<Node>()
-            .pool(EthereumPoolBuilder::default())
+            .pool(CustomPoolBuilder::default())
             .executor(EthereumExecutorBuilder::default())
             .payload(BasicPayloadServiceBuilder::default())
             .network(EthereumNetworkBuilder::default())
@@ -294,7 +304,7 @@ where
 {
     type ComponentsBuilder = ComponentsBuilder<
         N,
-        EthereumPoolBuilder,
+        CustomPoolBuilder,
         BasicPayloadServiceBuilder<EthereumPayloadBuilder>,
         EthereumNetworkBuilder,
         EthereumExecutorBuilder,
@@ -330,5 +340,115 @@ impl<N: FullNodeComponents<Types = Self>> DebugNode<N> for IrysEthereumNode {
                 withdrawals,
             },
         }
+    }
+}
+
+/// A custom pool builder
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub struct CustomPoolBuilder;
+
+/// Implement the [`PoolBuilder`] trait for the custom pool builder
+///
+/// This will be used to build the transaction pool and its maintenance tasks during launch.
+impl<Types, Node> PoolBuilder<Node> for CustomPoolBuilder
+where
+    Types: NodeTypes<
+        ChainSpec: EthereumHardforks,
+        Primitives: NodePrimitives<SignedTx = TransactionSigned>,
+    >,
+    Node: FullNodeTypes<Types = Types>,
+{
+    type Pool = EthTransactionPool<Node::Provider, DiskFileBlobStore>;
+
+    async fn build_pool(self, ctx: &BuilderContext<Node>) -> eyre::Result<Self::Pool> {
+        let data_dir = ctx.config().datadir();
+        let pool_config = ctx.pool_config();
+
+        let blob_cache_size = if let Some(blob_cache_size) = pool_config.blob_cache_size {
+            blob_cache_size
+        } else {
+            // get the current blob params for the current timestamp, fallback to default Cancun
+            // params
+            let current_timestamp =
+                SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?.as_secs();
+            let blob_params = ctx
+                .chain_spec()
+                .blob_params_at_timestamp(current_timestamp)
+                .unwrap_or_else(BlobParams::cancun);
+
+            // Derive the blob cache size from the target blob count, to auto scale it by
+            // multiplying it with the slot count for 2 epochs: 384 for pectra
+            (blob_params.target_blob_count * EPOCH_SLOTS * 2) as u32
+        };
+
+        let custom_config =
+            DiskFileBlobStoreConfig::default().with_max_cached_entries(blob_cache_size);
+
+        let blob_store = DiskFileBlobStore::open(data_dir.blobstore(), custom_config)?;
+        let validator = TransactionValidationTaskExecutor::eth_builder(ctx.provider().clone())
+            .with_head_timestamp(ctx.head().timestamp)
+            .kzg_settings(ctx.kzg_settings()?)
+            .with_local_transactions_config(pool_config.local_transactions_config.clone())
+            .set_tx_fee_cap(ctx.config().rpc.rpc_tx_fee_cap)
+            .with_additional_tasks(ctx.config().txpool.additional_validation_tasks)
+            .build_with_tasks(ctx.task_executor().clone(), blob_store.clone());
+
+        let transaction_pool =
+            reth_transaction_pool::Pool::eth_pool(validator, blob_store, pool_config);
+        info!(target: "reth::cli", "Transaction pool initialized");
+
+        // spawn txpool maintenance task
+        {
+            let pool = transaction_pool.clone();
+            let chain_events = ctx.provider().canonical_state_stream();
+            let client = ctx.provider().clone();
+            // Only spawn backup task if not disabled
+            if !ctx.config().txpool.disable_transactions_backup {
+                // Use configured backup path or default to data dir
+                let transactions_path = ctx
+                    .config()
+                    .txpool
+                    .transactions_backup_path
+                    .clone()
+                    .unwrap_or_else(|| data_dir.txpool_transactions());
+
+                let transactions_backup_config =
+                    reth_transaction_pool::maintain::LocalTransactionBackupConfig::with_local_txs_backup(transactions_path);
+
+                ctx.task_executor().spawn_critical_with_graceful_shutdown_signal(
+                    "local transactions backup task",
+                    |shutdown| {
+                        reth_transaction_pool::maintain::backup_local_transactions_task(
+                            shutdown,
+                            pool.clone(),
+                            transactions_backup_config,
+                        )
+                    },
+                );
+            }
+
+            // spawn the maintenance task
+            ctx.task_executor().spawn_critical(
+                "txpool maintenance task",
+                reth_transaction_pool::maintain::maintain_transaction_pool_future(
+                    client,
+                    pool,
+                    chain_events,
+                    ctx.task_executor().clone(),
+                    reth_transaction_pool::maintain::MaintainPoolConfig {
+                        max_tx_lifetime: transaction_pool.config().max_queued_lifetime,
+                        no_local_exemptions: transaction_pool
+                            .config()
+                            .local_transactions_config
+                            .no_exemptions,
+                        ..Default::default()
+                    },
+                ),
+            );
+            debug!(target: "reth::cli", "Spawned txpool maintenance task");
+        }
+
+        Ok(transaction_pool)
     }
 }

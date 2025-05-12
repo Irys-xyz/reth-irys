@@ -23,6 +23,7 @@ reth.workspace = true
 reth-trie-db.workspace = true
 reth-ethereum-engine-primitives.workspace = true
 reth-ethereum-primitives.workspace = true
+reth-transaction-pool.workspace = true
 tokio.workspace = true
 eyre.workspace = true
 futures.workspace = true

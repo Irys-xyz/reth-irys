@@ -4865,6 +4865,7 @@ dependencies = [
  "reth-network",
  "reth-node-ethereum",
  "reth-tracing",
+ "reth-transaction-pool",
  "reth-trie-db",
  "serde_json",
  "tokio",

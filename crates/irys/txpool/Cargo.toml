@@ -1,5 +1,5 @@
 [package]
-name = "reth-optimism-txpool"
+name = "reth-irys-txpool"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -34,9 +34,9 @@ op-revm.workspace = true
 # optimism
 op-alloy-consensus.workspace = true
 op-alloy-flz.workspace = true
-reth-optimism-evm.workspace = true
-reth-optimism-forks.workspace = true
-reth-optimism-primitives.workspace = true
+reth-irys-evm.workspace = true
+reth-irys-forks.workspace = true
+reth-irys-primitives.workspace = true
 
 # metrics
 reth-metrics.workspace = true
@@ -53,5 +53,5 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["time"] }
 
 [dev-dependencies]
-reth-optimism-chainspec.workspace = true
+reth-irys-chainspec.workspace = true
 reth-provider = { workspace = true, features = ["test-utils"] }

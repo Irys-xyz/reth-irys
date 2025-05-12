@@ -1,5 +1,5 @@
 [package]
-name = "reth-optimism-cli"
+name = "reth-irys-cli"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -25,20 +25,20 @@ reth-stages.workspace = true
 reth-static-file.workspace = true
 reth-execution-types.workspace = true
 reth-node-core.workspace = true
-reth-optimism-node.workspace = true
+reth-irys-node.workspace = true
 reth-fs-util.workspace = true
 
 # so jemalloc metrics can be included
 reth-node-metrics.workspace = true
 
 ## optimism
-reth-optimism-primitives.workspace = true
-reth-optimism-chainspec = { workspace = true, features = ["superchain-configs"] }
-reth-optimism-consensus.workspace = true
+reth-irys-primitives.workspace = true
+reth-irys-chainspec = { workspace = true, features = ["superchain-configs"] }
+reth-irys-consensus.workspace = true
 
 reth-chainspec.workspace = true
 reth-node-events.workspace = true
-reth-optimism-evm.workspace = true
+reth-irys-evm.workspace = true
 reth-cli.workspace = true
 reth-cli-runner.workspace = true
 reth-node-builder = { workspace = true, features = ["op"] }
@@ -72,13 +72,13 @@ reth-db-common.workspace = true
 reth-cli-commands.workspace = true
 
 [build-dependencies]
-reth-optimism-chainspec = { workspace = true, features = ["std", "superchain-configs"] }
+reth-irys-chainspec = { workspace = true, features = ["std", "superchain-configs"] }
 
 [features]
 asm-keccak = [
     "alloy-primitives/asm-keccak",
     "reth-node-core/asm-keccak",
-    "reth-optimism-node/asm-keccak",
+    "reth-irys-node/asm-keccak",
 ]
 
 # Jemalloc feature for vergen to generate correct env vars
@@ -98,7 +98,7 @@ serde = [
     "alloy-primitives/serde",
     "op-alloy-consensus/serde",
     "reth-execution-types/serde",
-    "reth-optimism-primitives/serde",
+    "reth-irys-primitives/serde",
     "reth-primitives-traits/serde",
-    "reth-optimism-chainspec/serde",
+    "reth-irys-chainspec/serde",
 ]

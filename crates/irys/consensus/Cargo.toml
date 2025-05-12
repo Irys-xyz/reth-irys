@@ -1,5 +1,5 @@
 [package]
-name = "reth-optimism-consensus"
+name = "reth-irys-consensus"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -23,8 +23,8 @@ reth-storage-errors.workspace = true
 reth-trie-common.workspace = true
 
 # op-reth
-reth-optimism-forks.workspace = true
-reth-optimism-primitives.workspace = true
+reth-irys-forks.workspace = true
+reth-irys-primitives.workspace = true
 
 # ethereum
 alloy-eips.workspace = true
@@ -43,8 +43,8 @@ reth-provider = { workspace = true, features = ["test-utils"] }
 reth-db-common.workspace = true
 reth-revm.workspace = true
 reth-trie.workspace = true
-reth-optimism-chainspec.workspace = true
-reth-optimism-node.workspace = true
+reth-irys-chainspec.workspace = true
+reth-irys-node.workspace = true
 reth-db-api = { workspace = true, features = ["op"] }
 
 alloy-chains.workspace = true
@@ -58,9 +58,9 @@ std = [
     "reth-consensus/std",
     "reth-consensus-common/std",
     "reth-primitives-traits/std",
-    "reth-optimism-forks/std",
-    "reth-optimism-chainspec/std",
-    "reth-optimism-primitives/std",
+    "reth-irys-forks/std",
+    "reth-irys-chainspec/std",
+    "reth-irys-primitives/std",
     "reth-storage-api/std",
     "reth-storage-errors/std",
     "reth-trie-common/std",

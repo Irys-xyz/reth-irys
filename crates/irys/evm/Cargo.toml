@@ -1,5 +1,5 @@
 [package]
-name = "reth-optimism-evm"
+name = "reth-irys-evm"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -27,10 +27,10 @@ op-alloy-consensus.workspace = true
 alloy-consensus.workspace = true
 
 # Optimism
-reth-optimism-consensus.workspace = true
-reth-optimism-chainspec.workspace = true
-reth-optimism-forks.workspace = true
-reth-optimism-primitives.workspace = true
+reth-irys-consensus.workspace = true
+reth-irys-chainspec.workspace = true
+reth-irys-forks.workspace = true
+reth-irys-primitives.workspace = true
 
 # revm
 revm.workspace = true
@@ -42,10 +42,10 @@ thiserror.workspace = true
 [dev-dependencies]
 reth-evm = { workspace = true, features = ["test-utils"] }
 reth-revm = { workspace = true, features = ["test-utils"] }
-reth-optimism-chainspec.workspace = true
+reth-irys-chainspec.workspace = true
 alloy-genesis.workspace = true
 alloy-consensus.workspace = true
-reth-optimism-primitives = { workspace = true, features = ["arbitrary"] }
+reth-irys-primitives = { workspace = true, features = ["arbitrary"] }
 
 [features]
 default = ["std"]
@@ -57,13 +57,13 @@ std = [
     "alloy-primitives/std",
     "reth-primitives-traits/std",
     "revm/std",
-    "reth-optimism-primitives/std",
-    "reth-optimism-forks/std",
+    "reth-irys-primitives/std",
+    "reth-irys-forks/std",
     "thiserror/std",
     "op-alloy-consensus/std",
     "reth-chainspec/std",
-    "reth-optimism-consensus/std",
-    "reth-optimism-chainspec/std",
+    "reth-irys-consensus/std",
+    "reth-irys-chainspec/std",
     "reth-execution-errors/std",
     "reth-execution-types/std",
     "alloy-evm/std",

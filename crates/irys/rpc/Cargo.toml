@@ -1,5 +1,5 @@
 [package]
-name = "reth-optimism-rpc"
+name = "reth-irys-rpc"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -31,13 +31,13 @@ reth-chainspec.workspace = true
 reth-rpc-engine-api.workspace = true
 
 # op-reth
-reth-optimism-chainspec.workspace = true
-reth-optimism-evm.workspace = true
-reth-optimism-payload-builder.workspace = true
-reth-optimism-txpool.workspace = true
+reth-irys-chainspec.workspace = true
+reth-irys-evm.workspace = true
+reth-irys-payload-builder.workspace = true
+reth-irys-txpool.workspace = true
 # TODO remove node-builder import
-reth-optimism-primitives = { workspace = true, features = ["reth-codec", "serde-bincode-compat"] }
-reth-optimism-forks.workspace = true
+reth-irys-primitives = { workspace = true, features = ["reth-codec", "serde-bincode-compat"] }
+reth-irys-forks.workspace = true
 
 # ethereum
 alloy-eips.workspace = true
@@ -76,7 +76,7 @@ tracing.workspace = true
 derive_more = { workspace = true, features = ["constructor"] }
 
 [dev-dependencies]
-reth-optimism-chainspec.workspace = true
+reth-irys-chainspec.workspace = true
 
 [features]
 client = [

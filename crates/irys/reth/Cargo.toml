@@ -1,5 +1,5 @@
 [package]
-name = "reth-op"
+name = "reth-irys"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -34,13 +34,13 @@ reth-transaction-pool = { workspace = true, optional = true }
 reth-trie = { workspace = true, optional = true }
 
 # reth-op
-reth-optimism-primitives.workspace = true
-reth-optimism-chainspec.workspace = true
-reth-optimism-consensus = { workspace = true, optional = true }
-reth-optimism-evm = { workspace = true, optional = true }
-reth-optimism-node = { workspace = true, optional = true }
-reth-optimism-rpc = { workspace = true, optional = true }
-reth-optimism-cli = { workspace = true, optional = true }
+reth-irys-primitives.workspace = true
+reth-irys-chainspec.workspace = true
+reth-irys-consensus = { workspace = true, optional = true }
+reth-irys-evm = { workspace = true, optional = true }
+reth-irys-node = { workspace = true, optional = true }
+reth-irys-rpc = { workspace = true, optional = true }
+reth-irys-cli = { workspace = true, optional = true }
 
 [features]
 default = ["std"]
@@ -48,10 +48,10 @@ std = [
     "reth-chainspec/std",
     "reth-consensus?/std",
     "reth-consensus-common?/std",
-    "reth-optimism-chainspec/std",
-    "reth-optimism-consensus?/std",
-    "reth-optimism-evm?/std",
-    "reth-optimism-primitives/std",
+    "reth-irys-chainspec/std",
+    "reth-irys-consensus?/std",
+    "reth-irys-evm?/std",
+    "reth-irys-primitives/std",
     "reth-primitives-traits/std",
     "reth-storage-api?/std",
     "reth-evm?/std",
@@ -60,7 +60,7 @@ std = [
 arbitrary = [
     "std",
     "reth-chainspec/arbitrary",
-    "reth-optimism-primitives/arbitrary",
+    "reth-irys-primitives/arbitrary",
     "reth-primitives-traits/arbitrary",
     "reth-db?/arbitrary",
     "reth-transaction-pool?/arbitrary",
@@ -74,7 +74,7 @@ test-utils = [
     "reth-evm?/test-utils",
     "reth-revm?/test-utils",
     "reth-network?/test-utils",
-    "reth-optimism-node?/test-utils",
+    "reth-irys-node?/test-utils",
     "reth-primitives-traits/test-utils",
     "reth-provider?/test-utils",
     "reth-trie?/test-utils",
@@ -83,21 +83,21 @@ test-utils = [
 
 full = ["consensus", "evm", "node", "provider", "rpc", "trie", "pool", "network"]
 
-alloy-compat = ["reth-optimism-primitives/alloy-compat"]
-cli = ["dep:reth-optimism-cli"]
+alloy-compat = ["reth-irys-primitives/alloy-compat"]
+cli = ["dep:reth-irys-cli"]
 consensus = [
     "dep:reth-consensus",
     "dep:reth-consensus-common",
-    "dep:reth-optimism-consensus",
+    "dep:reth-irys-consensus",
 ]
-evm = ["dep:reth-evm", "dep:reth-optimism-evm", "dep:reth-revm"]
+evm = ["dep:reth-evm", "dep:reth-irys-evm", "dep:reth-revm"]
 node-api = ["dep:reth-node-api", "dep:reth-node-core"]
 node = [
     "provider",
     "consensus",
     "evm",
     "node-api",
-    "dep:reth-optimism-node",
+    "dep:reth-irys-node",
     "rpc",
     "trie",
 ]
@@ -106,7 +106,7 @@ rpc = [
     "dep:reth-rpc-builder",
     "dep:reth-rpc-api",
     "dep:reth-rpc-eth-types",
-    "dep:reth-optimism-rpc",
+    "dep:reth-irys-rpc",
 ]
 js-tracer = ["rpc", "reth-rpc/js-tracer"]
 network = ["dep:reth-network", "dep:reth-network-api", "dep:reth-eth-wire"]

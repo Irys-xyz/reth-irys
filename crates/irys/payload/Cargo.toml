@@ -1,5 +1,5 @@
 [package]
-name = "reth-optimism-payload-builder"
+name = "reth-irys-payload-builder"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -29,10 +29,10 @@ reth-chain-state.workspace = true
 reth-payload-validator.workspace = true
 
 # op-reth
-reth-optimism-evm.workspace = true
-reth-optimism-forks.workspace = true
-reth-optimism-primitives.workspace = true
-reth-optimism-txpool.workspace = true
+reth-irys-evm.workspace = true
+reth-irys-forks.workspace = true
+reth-irys-primitives.workspace = true
+reth-irys-txpool.workspace = true
 
 # ethereum
 revm.workspace = true

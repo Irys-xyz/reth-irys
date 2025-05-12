@@ -1,5 +1,5 @@
 [package]
-name = "reth-optimism-node"
+name = "reth-irys-node"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -34,14 +34,14 @@ reth-rpc-engine-api.workspace = true
 reth-rpc-api.workspace = true
 
 # op-reth
-reth-optimism-payload-builder.workspace = true
-reth-optimism-evm.workspace = true
-reth-optimism-rpc.workspace = true
-reth-optimism-txpool.workspace = true
-reth-optimism-chainspec.workspace = true
-reth-optimism-consensus = { workspace = true, features = ["std"] }
-reth-optimism-forks.workspace = true
-reth-optimism-primitives = { workspace = true, features = ["serde", "serde-bincode-compat", "reth-codec"] }
+reth-irys-payload-builder.workspace = true
+reth-irys-evm.workspace = true
+reth-irys-rpc.workspace = true
+reth-irys-txpool.workspace = true
+reth-irys-chainspec.workspace = true
+reth-irys-consensus = { workspace = true, features = ["std"] }
+reth-irys-forks.workspace = true
+reth-irys-primitives = { workspace = true, features = ["serde", "serde-bincode-compat", "reth-codec"] }
 
 # revm with required optimism features
 revm = { workspace = true, features = ["secp256k1", "blst", "c-kzg"] }
@@ -67,7 +67,7 @@ tokio = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
 
 [dev-dependencies]
-reth-optimism-node = { workspace = true, features = ["test-utils"] }
+reth-irys-node = { workspace = true, features = ["test-utils"] }
 reth-db = { workspace = true, features = ["op"] }
 reth-node-core.workspace = true
 reth-node-builder = { workspace = true, features = ["test-utils"] }
@@ -90,7 +90,7 @@ default = ["reth-codec"]
 asm-keccak = [
     "alloy-primitives/asm-keccak",
     "revm/asm-keccak",
-    "reth-optimism-node/asm-keccak",
+    "reth-irys-node/asm-keccak",
     "reth-node-core/asm-keccak",
 ]
 js-tracer = [
@@ -113,11 +113,11 @@ test-utils = [
     "reth-provider/test-utils",
     "reth-transaction-pool/test-utils",
     "reth-trie-db/test-utils",
-    "reth-optimism-node/test-utils",
-    "reth-optimism-primitives/arbitrary",
+    "reth-irys-node/test-utils",
+    "reth-irys-primitives/arbitrary",
     "reth-primitives-traits/test-utils",
     "reth-trie-common/test-utils",
 ]
 reth-codec = [
-    "reth-optimism-primitives/reth-codec",
+    "reth-irys-primitives/reth-codec",
 ]

@@ -4,15 +4,32 @@ use alloy_eips::Encodable2718;
 use alloy_genesis::Genesis;
 use alloy_primitives::{Address, TxKind, B256, U256};
 use alloy_rpc_types::{engine::PayloadAttributes, TransactionInput, TransactionRequest};
-use reth::{payload::EthPayloadBuilderAttributes, providers::CanonStateSubscriptions};
+use reth::{
+    api::{FullNodeComponents, FullNodeTypes, NodeTypes, PayloadTypes},
+    builder::{
+        components::{BasicPayloadServiceBuilder, ComponentsBuilder},
+        DebugNode, Node, NodeAdapter, NodeComponentsBuilder,
+    },
+    payload::{EthBuiltPayload, EthPayloadBuilderAttributes},
+    primitives::EthPrimitives,
+    providers::{providers::ProviderFactoryBuilder, CanonStateSubscriptions, EthStorage},
+};
 use reth_chainspec::ChainSpec;
 use reth_e2e_test_utils::{setup, transaction::TransactionTestContext};
+use reth_ethereum_engine_primitives::EthPayloadAttributes;
 use reth_network::NetworkEventListenerProvider;
-use reth_node_ethereum::EthereumNode;
+use reth_node_ethereum::{
+    node::{
+        EthereumAddOns, EthereumConsensusBuilder, EthereumExecutorBuilder, EthereumNetworkBuilder,
+        EthereumPayloadBuilder, EthereumPoolBuilder,
+    },
+    EthEngineTypes, EthereumNode,
+};
 use reth_tracing::{
     tracing::{self, level_filters::LevelFilter},
     LayerInfo, LogFormat, RethTracer, Tracer,
 };
+use reth_trie_db::MerklePatriciaTrie;
 
 pub(crate) fn eth_payload_attributes(timestamp: u64) -> EthPayloadBuilderAttributes {
     let attributes = PayloadAttributes {
@@ -37,7 +54,7 @@ async fn main() -> eyre::Result<()> {
         .init();
 
     let (mut nodes, _tasks, wallet) =
-        setup::<EthereumNode>(1, custom_chain(), false, eth_payload_attributes).await?;
+        setup::<IrysEthereumNode>(1, custom_chain(), false, eth_payload_attributes).await?;
 
     let mut node = nodes.pop().unwrap();
     let mut node_engine_api_events = node.inner.provider.canonical_state_stream();
@@ -223,4 +240,95 @@ fn custom_chain() -> Arc<ChainSpec> {
 "#;
     let genesis: Genesis = serde_json::from_str(custom_genesis).unwrap();
     Arc::new(genesis.into())
+}
+
+/// -- eth node custom logic
+/// Type configuration for a regular Ethereum node.
+#[derive(Debug, Default, Clone, Copy)]
+#[non_exhaustive]
+pub struct IrysEthereumNode;
+
+impl NodeTypes for IrysEthereumNode {
+    type Primitives = EthPrimitives;
+    type ChainSpec = ChainSpec;
+    type StateCommitment = MerklePatriciaTrie;
+    type Storage = EthStorage;
+    type Payload = EthEngineTypes;
+}
+
+impl IrysEthereumNode {
+    /// Returns a [`ComponentsBuilder`] configured for a regular Ethereum node.
+    pub fn components<Node>() -> ComponentsBuilder<
+        Node,
+        EthereumPoolBuilder,
+        BasicPayloadServiceBuilder<EthereumPayloadBuilder>,
+        EthereumNetworkBuilder,
+        EthereumExecutorBuilder,
+        EthereumConsensusBuilder,
+    >
+    where
+        Node: FullNodeTypes<Types: NodeTypes<ChainSpec = ChainSpec, Primitives = EthPrimitives>>,
+        <Node::Types as NodeTypes>::Payload: PayloadTypes<
+            BuiltPayload = EthBuiltPayload,
+            PayloadAttributes = EthPayloadAttributes,
+            PayloadBuilderAttributes = EthPayloadBuilderAttributes,
+        >,
+    {
+        ComponentsBuilder::default()
+            .node_types::<Node>()
+            .pool(EthereumPoolBuilder::default())
+            .executor(EthereumExecutorBuilder::default())
+            .payload(BasicPayloadServiceBuilder::default())
+            .network(EthereumNetworkBuilder::default())
+            .consensus(EthereumConsensusBuilder::default())
+    }
+
+    pub fn provider_factory_builder() -> ProviderFactoryBuilder<Self> {
+        ProviderFactoryBuilder::default()
+    }
+}
+
+impl<N> Node<N> for IrysEthereumNode
+where
+    N: FullNodeTypes<Types = Self>,
+{
+    type ComponentsBuilder = ComponentsBuilder<
+        N,
+        EthereumPoolBuilder,
+        BasicPayloadServiceBuilder<EthereumPayloadBuilder>,
+        EthereumNetworkBuilder,
+        EthereumExecutorBuilder,
+        EthereumConsensusBuilder,
+    >;
+
+    type AddOns = EthereumAddOns<
+        NodeAdapter<N, <Self::ComponentsBuilder as NodeComponentsBuilder<N>>::Components>,
+    >;
+
+    fn components_builder(&self) -> Self::ComponentsBuilder {
+        Self::components()
+    }
+
+    fn add_ons(&self) -> Self::AddOns {
+        EthereumAddOns::default()
+    }
+}
+
+impl<N: FullNodeComponents<Types = Self>> DebugNode<N> for IrysEthereumNode {
+    type RpcBlock = alloy_rpc_types_eth::Block;
+
+    fn rpc_to_primitive_block(rpc_block: Self::RpcBlock) -> reth_ethereum_primitives::Block {
+        let alloy_rpc_types_eth::Block { header, transactions, withdrawals, .. } = rpc_block;
+        reth_ethereum_primitives::Block {
+            header: header.inner,
+            body: reth_ethereum_primitives::BlockBody {
+                transactions: transactions
+                    .into_transactions()
+                    .map(|tx| tx.inner.into_inner().into())
+                    .collect(),
+                ommers: Default::default(),
+                withdrawals,
+            },
+        }
+    }
 }

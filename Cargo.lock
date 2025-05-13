@@ -4850,8 +4850,10 @@ dependencies = [
 name = "irys"
 version = "1.3.12"
 dependencies = [
+ "alloy-consensus",
  "alloy-eips 0.15.10",
  "alloy-genesis",
+ "alloy-network",
  "alloy-primitives",
  "alloy-rpc-types",
  "alloy-rpc-types-eth",
@@ -4867,6 +4869,7 @@ dependencies = [
  "reth-tracing",
  "reth-transaction-pool",
  "reth-trie-db",
+ "serde",
  "serde_json",
  "tokio",
  "tracing",

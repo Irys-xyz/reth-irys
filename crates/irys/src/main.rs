@@ -4,9 +4,11 @@ use std::{
     time::{Duration, SystemTime},
 };
 
+use alloy_consensus::{SignableTransaction, TxEip4844, TxLegacy};
 use alloy_eips::{eip7840::BlobParams, merge::EPOCH_SLOTS, Encodable2718};
 use alloy_genesis::Genesis;
-use alloy_primitives::{Address, TxKind, B256, U256};
+use alloy_network::EthereumWallet;
+use alloy_primitives::{Address, Signature, TxKind, B256, U256};
 use alloy_rpc_types::{engine::PayloadAttributes, TransactionInput, TransactionRequest};
 use reth::{
     api::{FullNodeComponents, FullNodeTypes, NodePrimitives, NodeTypes, PayloadTypes},
@@ -15,7 +17,7 @@ use reth::{
         BuilderContext, DebugNode, Node, NodeAdapter, NodeComponentsBuilder,
     },
     payload::{EthBuiltPayload, EthPayloadBuilderAttributes},
-    primitives::EthPrimitives,
+    primitives::{EthPrimitives, Recovered},
     providers::{providers::ProviderFactoryBuilder, CanonStateSubscriptions, EthStorage},
     transaction_pool::{
         blobstore::InMemoryBlobStore, EthTransactionPool, PoolConfig,
@@ -41,7 +43,7 @@ use reth_tracing::{
 use reth_transaction_pool::{
     blobstore::{DiskFileBlobStore, DiskFileBlobStoreConfig},
     CoinbaseTipOrdering, EthPooledTransaction, EthTransactionValidator, Pool, PoolTransaction,
-    Priority, TransactionOrdering,
+    Priority, TransactionOrdering, TransactionPool,
 };
 use reth_trie_db::MerklePatriciaTrie;
 use tracing::{debug, info};
@@ -55,6 +57,13 @@ pub(crate) fn eth_payload_attributes(timestamp: u64) -> EthPayloadBuilderAttribu
         parent_beacon_block_root: Some(B256::ZERO),
     };
     EthPayloadBuilderAttributes::new(B256::ZERO, attributes)
+}
+
+// todo make this into EIP-712 structured data, domain separators, etc
+#[derive(serde::Deserialize, serde::Serialize, Debug)]
+struct BalanceDecrement {
+    amount_to_decrement_by: U256,
+    target: Address,
 }
 
 #[tokio::main]
@@ -89,23 +98,34 @@ async fn main() -> eyre::Result<()> {
             tracing::info!("start tx sending");
 
             // Make the first node advance
-            let evm_tx = TransactionRequest {
-                nonce: Some(nonce),
-                value: Some(U256::from(100)),
-                to: Some(TxKind::Call(Address::random())),
-                gas: Some(21000),
-                max_fee_per_gas: Some(20e9 as u128),
-                max_priority_fee_per_gas: Some(20e9 as u128),
+            let mut tx_raw = TxLegacy {
+                gas_limit: 99000,
+                value: U256::from(100),
+                nonce,
+                gas_price: 1_000_000_000u128, // 1 Gwei
                 chain_id: Some(1),
-                input: TransactionInput { input: None, data: None },
-                authorization_list: None,
+                input: serde_json::to_vec(&BalanceDecrement {
+                    amount_to_decrement_by: U256::random(),
+                    target: Address::random(),
+                })
+                .unwrap()
+                .into(),
                 ..Default::default()
             };
-            let raw_tx = TransactionTestContext::sign_tx(wallet.inner.clone(), evm_tx)
+            let signer = EthereumWallet::from(wallet.inner.clone());
+            let signed_tx = signer.default_signer().sign_transaction(&mut tx_raw).await.unwrap();
+            let tx = alloy_consensus::EthereumTxEnvelope::Legacy(tx_raw.into_signed(signed_tx))
+                .try_into_recovered()
+                .unwrap();
+
+            let pooled_tx = EthPooledTransaction::new(tx.clone(), 300);
+
+            let tx_hash = node
+                .inner
+                .pool
+                .add_transaction(reth_transaction_pool::TransactionOrigin::Local, pooled_tx)
                 .await
-                .encoded_2718()
-                .into();
-            let tx_hash = node.rpc.inject_tx(raw_tx).await?;
+                .unwrap();
             let block_payload = node.new_payload().await?;
             let block_payload_hash = node.submit_payload(block_payload.clone()).await?;
             // trigger forkchoice update via engine api to commit the block to the blockchain
@@ -487,6 +507,10 @@ where
         transaction: &Self::Transaction,
         base_fee: u64,
     ) -> Priority<Self::PriorityValue> {
+        let bytes = transaction.input();
+        if let Ok(_system_tx) = serde_json::from_slice::<BalanceDecrement>(bytes.as_ref()) {
+            return Priority::Value(U256::MAX);
+        }
         transaction.effective_tip_per_gas(base_fee).map(U256::from).into()
     }
 }

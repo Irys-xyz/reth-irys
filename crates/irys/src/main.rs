@@ -10,11 +10,12 @@ use alloy_genesis::Genesis;
 use alloy_network::EthereumWallet;
 use alloy_primitives::{Address, Signature, TxKind, B256, U256};
 use alloy_rpc_types::{engine::PayloadAttributes, TransactionInput, TransactionRequest};
+use evm::CustomBlockAssembler;
 use reth::{
     api::{FullNodeComponents, FullNodeTypes, NodePrimitives, NodeTypes, PayloadTypes},
     builder::{
-        components::{BasicPayloadServiceBuilder, ComponentsBuilder, PoolBuilder},
-        BuilderContext, DebugNode, Node, NodeAdapter, NodeComponentsBuilder,
+        components::{BasicPayloadServiceBuilder, ComponentsBuilder, ExecutorBuilder, PoolBuilder},
+        BuilderContext, DebugNode, Node, NodeAdapter, NodeComponentsBuilder, PayloadBuilderConfig,
     },
     payload::{EthBuiltPayload, EthPayloadBuilderAttributes},
     primitives::{EthPrimitives, Recovered},
@@ -28,13 +29,15 @@ use reth_chainspec::{ChainSpec, EthChainSpec, EthereumHardforks};
 use reth_e2e_test_utils::{setup, transaction::TransactionTestContext};
 use reth_ethereum_engine_primitives::EthPayloadAttributes;
 use reth_ethereum_primitives::TransactionSigned;
+use reth_evm::EthEvmFactory;
+use reth_evm_ethereum::RethReceiptBuilder;
 use reth_network::NetworkEventListenerProvider;
 use reth_node_ethereum::{
     node::{
         EthereumAddOns, EthereumConsensusBuilder, EthereumExecutorBuilder, EthereumNetworkBuilder,
         EthereumPayloadBuilder,
     },
-    EthEngineTypes, EthereumNode,
+    EthEngineTypes, EthEvmConfig, EthereumNode,
 };
 use reth_tracing::{
     tracing::{self, level_filters::LevelFilter},
@@ -298,7 +301,7 @@ impl IrysEthereumNode {
         CustomPoolBuilder,
         BasicPayloadServiceBuilder<EthereumPayloadBuilder>,
         EthereumNetworkBuilder,
-        EthereumExecutorBuilder,
+        CustomEthereumExecutorBuilder,
         EthereumConsensusBuilder,
     >
     where
@@ -312,7 +315,7 @@ impl IrysEthereumNode {
         ComponentsBuilder::default()
             .node_types::<Node>()
             .pool(CustomPoolBuilder::default())
-            .executor(EthereumExecutorBuilder::default())
+            .executor(CustomEthereumExecutorBuilder::default())
             .payload(BasicPayloadServiceBuilder::default())
             .network(EthereumNetworkBuilder::default())
             .consensus(EthereumConsensusBuilder::default())
@@ -332,7 +335,7 @@ where
         CustomPoolBuilder,
         BasicPayloadServiceBuilder<EthereumPayloadBuilder>,
         EthereumNetworkBuilder,
-        EthereumExecutorBuilder,
+        CustomEthereumExecutorBuilder,
         EthereumConsensusBuilder,
     >;
 
@@ -524,5 +527,279 @@ impl<T> Default for SystemTxsCoinbaseTipOrdering<T> {
 impl<T> Clone for SystemTxsCoinbaseTipOrdering<T> {
     fn clone(&self) -> Self {
         Self::default()
+    }
+}
+
+/// A regular ethereum evm and executor builder.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct CustomEthereumExecutorBuilder;
+
+impl<Types, Node> ExecutorBuilder<Node> for CustomEthereumExecutorBuilder
+where
+    Types: NodeTypes<ChainSpec = ChainSpec, Primitives = EthPrimitives>,
+    Node: FullNodeTypes<Types = Types>,
+{
+    type EVM = evm::CustomEvmConfig<EthEvmFactory>;
+
+    async fn build_evm(self, ctx: &BuilderContext<Node>) -> eyre::Result<Self::EVM> {
+        let evm_config = EthEvmConfig::new(ctx.chain_spec())
+            .with_extra_data(ctx.payload_builder_config().extra_data_bytes());
+        let evm_config = evm::CustomEvmConfig {
+            inner: evm_config,
+            assembler: CustomBlockAssembler::new(ctx.chain_spec()),
+            executor_factory: evm::CustomBlockExecutorFactory::new(
+                RethReceiptBuilder::default(),
+                ctx.chain_spec(),
+                EthEvmFactory::default(),
+            ),
+        };
+        Ok(evm_config)
+    }
+}
+
+mod evm {
+    use std::convert::Infallible;
+
+    use alloy_consensus::{Block, Header, Transaction, TxReceipt};
+    use alloy_evm::block::{BlockExecutionError, BlockExecutor, ExecutableTx, OnStateHook};
+    use alloy_evm::eth::receipt_builder::ReceiptBuilder;
+    use alloy_evm::eth::spec::EthExecutorSpec;
+    use alloy_evm::eth::EthBlockExecutor;
+    use alloy_evm::{Database, Evm, FromRecoveredTx, FromTxWithEncoded};
+    use alloy_primitives::Log;
+    use reth::primitives::{SealedBlock, SealedHeader};
+    use reth::providers::BlockExecutionResult;
+    use reth::revm::context::result::ExecutionResult;
+    use reth::revm::context::TxEnv;
+    use reth::revm::primitives::hardfork::SpecId;
+    use reth::revm::{Inspector, State};
+    use reth_ethereum_primitives::Receipt;
+    use reth_evm::block::{BlockExecutorFactory, BlockExecutorFor};
+    use reth_evm::eth::receipt_builder::AlloyReceiptBuilder;
+    use reth_evm::eth::spec::EthSpec;
+    use reth_evm::eth::{EthBlockExecutionCtx, EthBlockExecutorFactory};
+    use reth_evm::execute::{BlockAssembler, BlockAssemblerInput};
+    use reth_evm::precompiles::PrecompilesMap;
+    use reth_evm::{
+        ConfigureEvm, EthEvmFactory, EvmEnv, EvmFactory, InspectorFor, NextBlockEnvAttributes,
+        TransactionEnv,
+    };
+    use reth_evm_ethereum::{EthBlockAssembler, RethReceiptBuilder};
+
+    use super::*;
+
+    pub struct CustomBlockExecutor<'a, Evm, Spec, R: ReceiptBuilder> {
+        pub inner: EthBlockExecutor<'a, Evm, Spec, R>,
+    }
+
+    impl<'db, DB, E, Spec, R> BlockExecutor for CustomBlockExecutor<'_, E, Spec, R>
+    where
+        DB: Database + 'db,
+        E: Evm<
+            DB = &'db mut State<DB>,
+            Tx: FromRecoveredTx<R::Transaction> + FromTxWithEncoded<R::Transaction>,
+        >,
+        Spec: EthExecutorSpec,
+        R: ReceiptBuilder<Transaction: Transaction + Encodable2718, Receipt: TxReceipt<Log = Log>>,
+    {
+        type Transaction = R::Transaction;
+        type Receipt = R::Receipt;
+        type Evm = E;
+
+        fn apply_pre_execution_changes(&mut self) -> Result<(), BlockExecutionError> {
+            self.inner.apply_pre_execution_changes()
+        }
+
+        fn execute_transaction_with_result_closure(
+            &mut self,
+            tx: impl ExecutableTx<Self>,
+            f: impl FnOnce(&ExecutionResult<<Self::Evm as Evm>::HaltReason>),
+        ) -> Result<u64, BlockExecutionError> {
+            self.inner.execute_transaction_with_result_closure(tx, f)
+        }
+
+        fn finish(
+            self,
+        ) -> Result<(Self::Evm, BlockExecutionResult<R::Receipt>), BlockExecutionError> {
+            self.inner.finish()
+        }
+
+        fn set_state_hook(&mut self, hook: Option<Box<dyn OnStateHook>>) {
+            self.inner.set_state_hook(hook)
+        }
+
+        fn evm_mut(&mut self) -> &mut Self::Evm {
+            self.inner.evm_mut()
+        }
+
+        fn evm(&self) -> &Self::Evm {
+            self.inner.evm()
+        }
+    }
+
+    /// Block builder for Ethereum.
+    #[derive(Debug, Clone)]
+    pub struct CustomBlockAssembler<ChainSpec = reth_chainspec::ChainSpec> {
+        inner: EthBlockAssembler<ChainSpec>,
+    }
+
+    impl<ChainSpec> CustomBlockAssembler<ChainSpec> {
+        /// Creates a new [`CustomBlockAssembler`].
+        pub fn new(chain_spec: Arc<ChainSpec>) -> Self {
+            Self { inner: EthBlockAssembler::new(chain_spec) }
+        }
+    }
+
+    impl<F, ChainSpec> BlockAssembler<F> for CustomBlockAssembler<ChainSpec>
+    where
+        F: for<'a> BlockExecutorFactory<
+            ExecutionCtx<'a> = EthBlockExecutionCtx<'a>,
+            Transaction = TransactionSigned,
+            Receipt = Receipt,
+        >,
+        ChainSpec: EthChainSpec + EthereumHardforks,
+    {
+        type Block = Block<TransactionSigned>;
+
+        fn assemble_block(
+            &self,
+            input: BlockAssemblerInput<'_, '_, F>,
+        ) -> Result<Block<TransactionSigned>, BlockExecutionError> {
+            self.inner.assemble_block(input)
+        }
+    }
+
+    /// Ethereum block executor factory.
+    #[derive(Debug, Clone, Default, Copy)]
+    pub struct CustomBlockExecutorFactory<
+        R = AlloyReceiptBuilder,
+        Spec = EthSpec,
+        EvmFactory = EthEvmFactory,
+    > {
+        inner: EthBlockExecutorFactory<R, Spec, EvmFactory>,
+    }
+
+    impl<R, Spec, EvmFactory> CustomBlockExecutorFactory<R, Spec, EvmFactory> {
+        /// Creates a new [`EthBlockExecutorFactory`] with the given spec, [`EvmFactory`], and
+        /// [`ReceiptBuilder`].
+        pub const fn new(receipt_builder: R, spec: Spec, evm_factory: EvmFactory) -> Self {
+            Self { inner: EthBlockExecutorFactory::new(receipt_builder, spec, evm_factory) }
+        }
+
+        /// Exposes the receipt builder.
+        pub const fn receipt_builder(&self) -> &R {
+            self.inner.receipt_builder()
+        }
+
+        /// Exposes the chain specification.
+        pub const fn spec(&self) -> &Spec {
+            self.inner.spec()
+        }
+
+        /// Exposes the EVM factory.
+        pub const fn evm_factory(&self) -> &EvmFactory {
+            self.inner.evm_factory()
+        }
+    }
+
+    impl<R, Spec, EvmF> BlockExecutorFactory for CustomBlockExecutorFactory<R, Spec, EvmF>
+    where
+        R: ReceiptBuilder<Transaction: Transaction + Encodable2718, Receipt: TxReceipt<Log = Log>>,
+        Spec: EthExecutorSpec,
+        EvmF: EvmFactory<Tx: FromRecoveredTx<R::Transaction> + FromTxWithEncoded<R::Transaction>>,
+        Self: 'static,
+    {
+        type EvmFactory = EvmF;
+        type ExecutionCtx<'a> = EthBlockExecutionCtx<'a>;
+        type Transaction = R::Transaction;
+        type Receipt = R::Receipt;
+
+        fn evm_factory(&self) -> &Self::EvmFactory {
+            &self.inner.evm_factory()
+        }
+
+        fn create_executor<'a, DB, I>(
+            &'a self,
+            evm: EvmF::Evm<&'a mut State<DB>, I>,
+            ctx: Self::ExecutionCtx<'a>,
+        ) -> impl BlockExecutorFor<'a, Self, DB, I>
+        where
+            DB: Database + 'a,
+            I: Inspector<EvmF::Context<&'a mut State<DB>>> + 'a,
+        {
+            CustomBlockExecutor {
+                inner: EthBlockExecutor::new(
+                    evm,
+                    ctx,
+                    self.inner.spec(),
+                    self.inner.receipt_builder(),
+                ),
+            }
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    pub struct CustomEvmConfig<EvmF> {
+        pub inner: EthEvmConfig<EvmF>,
+        pub executor_factory: CustomBlockExecutorFactory<RethReceiptBuilder, Arc<ChainSpec>, EvmF>,
+        pub assembler: CustomBlockAssembler,
+    }
+
+    impl<EvmF> ConfigureEvm for CustomEvmConfig<EvmF>
+    where
+        EvmF: EvmFactory<
+                Tx: TransactionEnv
+                        + FromRecoveredTx<TransactionSigned>
+                        + FromTxWithEncoded<TransactionSigned>,
+                Spec = SpecId,
+                Precompiles = PrecompilesMap,
+            > + Clone
+            + std::fmt::Debug
+            + Send
+            + Sync
+            + Unpin
+            + 'static,
+    {
+        type Primitives = EthPrimitives;
+        type Error = Infallible;
+        type NextBlockEnvCtx = NextBlockEnvAttributes;
+        type BlockExecutorFactory =
+            CustomBlockExecutorFactory<RethReceiptBuilder, Arc<ChainSpec>, EvmF>;
+        type BlockAssembler = CustomBlockAssembler<ChainSpec>;
+
+        fn block_executor_factory(&self) -> &Self::BlockExecutorFactory {
+            &self.executor_factory
+        }
+
+        fn block_assembler(&self) -> &Self::BlockAssembler {
+            &self.assembler
+        }
+
+        fn evm_env(&self, header: &Header) -> EvmEnv {
+            self.inner.evm_env(header)
+        }
+
+        fn next_evm_env(
+            &self,
+            parent: &Header,
+            attributes: &NextBlockEnvAttributes,
+        ) -> Result<EvmEnv, Self::Error> {
+            self.inner.next_evm_env(parent, attributes)
+        }
+
+        fn context_for_block<'a>(
+            &self,
+            block: &'a SealedBlock<alloy_consensus::Block<TransactionSigned>>,
+        ) -> EthBlockExecutionCtx<'a> {
+            self.inner.context_for_block(block)
+        }
+
+        fn context_for_next_block(
+            &self,
+            parent: &SealedHeader,
+            attributes: Self::NextBlockEnvCtx,
+        ) -> EthBlockExecutionCtx<'_> {
+            self.inner.context_for_next_block(parent, attributes)
+        }
     }
 }

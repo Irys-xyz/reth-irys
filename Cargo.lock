@@ -4852,6 +4852,7 @@ version = "1.3.12"
 dependencies = [
  "alloy-consensus",
  "alloy-eips 0.15.10",
+ "alloy-evm",
  "alloy-genesis",
  "alloy-network",
  "alloy-primitives",
@@ -4864,6 +4865,8 @@ dependencies = [
  "reth-e2e-test-utils",
  "reth-ethereum-engine-primitives",
  "reth-ethereum-primitives",
+ "reth-evm",
+ "reth-evm-ethereum",
  "reth-network",
  "reth-node-ethereum",
  "reth-tracing",

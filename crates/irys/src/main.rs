@@ -590,8 +590,8 @@ mod evm {
 
     use super::*;
 
-    pub struct CustomBlockExecutor<'a, Evm, R: ReceiptBuilder> {
-        pub inner: EthBlockExecutor<'a, Evm, &'a Arc<ChainSpec>, R>,
+    pub struct CustomBlockExecutor<'a, Evm> {
+        pub inner: EthBlockExecutor<'a, Evm, &'a Arc<ChainSpec>, &'a RethReceiptBuilder>,
     }
 
     struct MyCustomTx<R, E> {
@@ -630,17 +630,16 @@ mod evm {
         }
     }
 
-    impl<'db, DB, E, R> BlockExecutor for CustomBlockExecutor<'_, E, R>
+    impl<'db, DB, E> BlockExecutor for CustomBlockExecutor<'_, E>
     where
         DB: Database + 'db,
         E: Evm<
             DB = &'db mut State<DB>,
-            Tx: FromRecoveredTx<R::Transaction> + FromTxWithEncoded<R::Transaction>,
+            Tx: FromRecoveredTx<TransactionSigned> + FromTxWithEncoded<TransactionSigned>,
         >,
-        R: ReceiptBuilder<Transaction: Transaction + Encodable2718, Receipt: TxReceipt<Log = Log>>,
     {
-        type Transaction = R::Transaction;
-        type Receipt = R::Receipt;
+        type Transaction = TransactionSigned;
+        type Receipt = Receipt;
         type Evm = E;
 
         fn apply_pre_execution_changes(&mut self) -> Result<(), BlockExecutionError> {
@@ -660,8 +659,8 @@ mod evm {
                 dbg!(&decrement_tx);
 
                 // IntoTxEnv<<E::Evm as Evm>::Tx> + RecoveredTx<E::Transaction> + Copy
-                // Tx: FromRecoveredTx<R::Transaction> + FromTxWithEncoded<R::Transaction>,
-                let tx1 = MyCustomTx::<R, E> { _r: PhantomData, _e: PhantomData };
+                // Tx: FromRecoveredTx<TransactionSigned> + FromTxWithEncoded<TransactionSigned>,
+                // let tx1 = MyCustomTx::<R, E> { _r: PhantomData, _e: PhantomData };
                 // self.inner.execute_transaction_with_result_closure(tx1, f)
                 self.inner.execute_transaction_with_result_closure(tx, f)
             } else {
@@ -669,9 +668,7 @@ mod evm {
             }
         }
 
-        fn finish(
-            self,
-        ) -> Result<(Self::Evm, BlockExecutionResult<R::Receipt>), BlockExecutionError> {
+        fn finish(self) -> Result<(Self::Evm, BlockExecutionResult<Receipt>), BlockExecutionError> {
             self.inner.finish()
         }
 
@@ -775,13 +772,9 @@ mod evm {
             DB: Database + 'a,
             I: Inspector<<EthEvmFactory as EvmFactory>::Context<&'a mut State<DB>>> + 'a,
         {
+            let receipt_builder = self.inner.receipt_builder();
             CustomBlockExecutor {
-                inner: EthBlockExecutor::new(
-                    evm,
-                    ctx,
-                    self.inner.spec(),
-                    self.inner.receipt_builder(),
-                ),
+                inner: EthBlockExecutor::new(evm, ctx, self.inner.spec(), receipt_builder),
             }
         }
     }

@@ -577,7 +577,6 @@ mod evm {
     use reth::revm::{Inspector, State};
     use reth_ethereum_primitives::Receipt;
     use reth_evm::block::{BlockExecutorFactory, BlockExecutorFor};
-    use reth_evm::eth::receipt_builder::AlloyReceiptBuilder;
     use reth_evm::eth::spec::EthSpec;
     use reth_evm::eth::{EthBlockExecutionCtx, EthBlockExecutorFactory};
     use reth_evm::execute::{BlockAssembler, BlockAssemblerInput};
@@ -724,7 +723,7 @@ mod evm {
     /// Ethereum block executor factory.
     #[derive(Debug, Clone, Default, Copy)]
     pub struct CustomBlockExecutorFactory<
-        R = AlloyReceiptBuilder,
+        R = RethReceiptBuilder,
         Spec = EthSpec,
         EvmFactory = EthEvmFactory,
     > {

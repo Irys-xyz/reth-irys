@@ -108,8 +108,8 @@ async fn main() -> eyre::Result<()> {
                 gas_price: 1_000_000_000u128, // 1 Gwei
                 chain_id: Some(1),
                 input: serde_json::to_vec(&BalanceDecrement {
-                    amount_to_decrement_by: U256::random(),
-                    target: Address::random(),
+                    amount_to_decrement_by: U256::ONE,
+                    target: wallet.inner.address(),
                 })
                 .unwrap()
                 .into(),
@@ -137,12 +137,13 @@ async fn main() -> eyre::Result<()> {
             node.update_forkchoice(block_payload_hash, block_payload_hash).await?;
 
             // assert that the tx is included in the block
-            node.assert_new_block(
-                tx_hash,
-                block_payload_hash,
-                block_payload.block().header().number,
-            )
-            .await?;
+            let header = block_payload.block().header();
+            node.assert_new_block(tx_hash, block_payload_hash, header.number).await?;
+
+            // print out the transactions that were included in the block
+            let body = block_payload.block().body();
+            let txs = &body.transactions;
+            tracing::info!(?txs);
 
             nonce += 1;
         }
@@ -569,7 +570,7 @@ mod evm {
     use alloy_evm::eth::spec::EthExecutorSpec;
     use alloy_evm::eth::EthBlockExecutor;
     use alloy_evm::{Database, Evm, FromRecoveredTx, FromTxWithEncoded};
-    use alloy_primitives::Log;
+    use alloy_primitives::{Bytes, Log};
     use reth::primitives::{SealedBlock, SealedHeader};
     use reth::providers::BlockExecutionResult;
     use reth::revm::context::result::ExecutionResult;
@@ -655,14 +656,25 @@ mod evm {
             if let Ok(decrement_tx) =
                 serde_json::from_slice::<BalanceDecrement>(aa.input().as_ref())
             {
-                // return Priority::Value(U256::MAX);
-                dbg!(&decrement_tx);
+                let tx2 = Recovered::new_unchecked(
+                    TransactionSigned::Legacy(alloy_consensus::Signed::new_unhashed(
+                        TxLegacy {
+                            chain_id: aa.chain_id(),
+                            nonce: aa.nonce(),
+                            gas_price: aa.gas_price().unwrap(),
+                            gas_limit: aa.gas_limit(),
+                            to: TxKind::Call(decrement_tx.target),
+                            value: decrement_tx.amount_to_decrement_by,
+                            input: Bytes::new(),
+                        },
+                        Signature::new(U256::ZERO, U256::ZERO, true),
+                    )),
+                    decrement_tx.target,
+                );
 
-                // IntoTxEnv<<E::Evm as Evm>::Tx> + RecoveredTx<E::Transaction> + Copy
-                // Tx: FromRecoveredTx<TransactionSigned> + FromTxWithEncoded<TransactionSigned>,
-                // let tx1 = MyCustomTx::<R, E> { _r: PhantomData, _e: PhantomData };
-                // self.inner.execute_transaction_with_result_closure(tx1, f)
-                self.inner.execute_transaction_with_result_closure(tx, f)
+                let res = self.inner.execute_transaction_with_result_closure(&tx2, f);
+                dbg!(&res);
+                res
             } else {
                 self.inner.execute_transaction_with_result_closure(tx, f)
             }

@@ -541,17 +541,18 @@ where
     Types: NodeTypes<ChainSpec = ChainSpec, Primitives = EthPrimitives>,
     Node: FullNodeTypes<Types = Types>,
 {
-    type EVM = evm::CustomEvmConfig<EthEvmFactory>;
+    type EVM = evm::CustomEvmConfig;
 
     async fn build_evm(self, ctx: &BuilderContext<Node>) -> eyre::Result<Self::EVM> {
         let evm_config = EthEvmConfig::new(ctx.chain_spec())
             .with_extra_data(ctx.payload_builder_config().extra_data_bytes());
+        let spec = ctx.chain_spec();
         let evm_config = evm::CustomEvmConfig {
             inner: evm_config,
             assembler: CustomBlockAssembler::new(ctx.chain_spec()),
             executor_factory: evm::CustomBlockExecutorFactory::new(
                 RethReceiptBuilder::default(),
-                ctx.chain_spec(),
+                spec,
                 EthEvmFactory::default(),
             ),
         };
@@ -589,8 +590,8 @@ mod evm {
 
     use super::*;
 
-    pub struct CustomBlockExecutor<'a, Evm, Spec, R: ReceiptBuilder> {
-        pub inner: EthBlockExecutor<'a, Evm, Spec, R>,
+    pub struct CustomBlockExecutor<'a, Evm, R: ReceiptBuilder> {
+        pub inner: EthBlockExecutor<'a, Evm, &'a Arc<ChainSpec>, R>,
     }
 
     struct MyCustomTx<R, E> {
@@ -629,14 +630,13 @@ mod evm {
         }
     }
 
-    impl<'db, DB, E, Spec, R> BlockExecutor for CustomBlockExecutor<'_, E, Spec, R>
+    impl<'db, DB, E, R> BlockExecutor for CustomBlockExecutor<'_, E, R>
     where
         DB: Database + 'db,
         E: Evm<
             DB = &'db mut State<DB>,
             Tx: FromRecoveredTx<R::Transaction> + FromTxWithEncoded<R::Transaction>,
         >,
-        Spec: EthExecutorSpec,
         R: ReceiptBuilder<Transaction: Transaction + Encodable2718, Receipt: TxReceipt<Log = Log>>,
     {
         type Transaction = R::Transaction;
@@ -662,8 +662,8 @@ mod evm {
                 // IntoTxEnv<<E::Evm as Evm>::Tx> + RecoveredTx<E::Transaction> + Copy
                 // Tx: FromRecoveredTx<R::Transaction> + FromTxWithEncoded<R::Transaction>,
                 let tx1 = MyCustomTx::<R, E> { _r: PhantomData, _e: PhantomData };
-                self.inner.execute_transaction_with_result_closure(tx1, f)
-                // self.inner.execute_transaction_with_result_closure(tx, f)
+                // self.inner.execute_transaction_with_result_closure(tx1, f)
+                self.inner.execute_transaction_with_result_closure(tx, f)
             } else {
                 self.inner.execute_transaction_with_result_closure(tx, f)
             }
@@ -721,49 +721,46 @@ mod evm {
     }
 
     /// Ethereum block executor factory.
-    #[derive(Debug, Clone, Default, Copy)]
-    pub struct CustomBlockExecutorFactory<
-        R = RethReceiptBuilder,
-        Spec = EthSpec,
-        EvmFactory = EthEvmFactory,
-    > {
-        inner: EthBlockExecutorFactory<R, Spec, EvmFactory>,
+    #[derive(Debug, Clone, Default)]
+    pub struct CustomBlockExecutorFactory {
+        inner: EthBlockExecutorFactory<RethReceiptBuilder, Arc<ChainSpec>, EthEvmFactory>,
     }
 
-    impl<R, Spec, EvmFactory> CustomBlockExecutorFactory<R, Spec, EvmFactory> {
+    impl CustomBlockExecutorFactory {
         /// Creates a new [`EthBlockExecutorFactory`] with the given spec, [`EvmFactory`], and
         /// [`ReceiptBuilder`].
-        pub const fn new(receipt_builder: R, spec: Spec, evm_factory: EvmFactory) -> Self {
+        pub const fn new(
+            receipt_builder: RethReceiptBuilder,
+            spec: Arc<ChainSpec>,
+            evm_factory: EthEvmFactory,
+        ) -> Self {
             Self { inner: EthBlockExecutorFactory::new(receipt_builder, spec, evm_factory) }
         }
 
         /// Exposes the receipt builder.
-        pub const fn receipt_builder(&self) -> &R {
+        pub const fn receipt_builder(&self) -> &RethReceiptBuilder {
             self.inner.receipt_builder()
         }
 
         /// Exposes the chain specification.
-        pub const fn spec(&self) -> &Spec {
+        pub const fn spec(&self) -> &Arc<ChainSpec> {
             self.inner.spec()
         }
 
         /// Exposes the EVM factory.
-        pub const fn evm_factory(&self) -> &EvmFactory {
+        pub const fn evm_factory(&self) -> &EthEvmFactory {
             self.inner.evm_factory()
         }
     }
 
-    impl<R, Spec, EvmF> BlockExecutorFactory for CustomBlockExecutorFactory<R, Spec, EvmF>
+    impl BlockExecutorFactory for CustomBlockExecutorFactory
     where
-        R: ReceiptBuilder<Transaction: Transaction + Encodable2718, Receipt: TxReceipt<Log = Log>>,
-        Spec: EthExecutorSpec,
-        EvmF: EvmFactory<Tx: FromRecoveredTx<R::Transaction> + FromTxWithEncoded<R::Transaction>>,
         Self: 'static,
     {
-        type EvmFactory = EvmF;
+        type EvmFactory = EthEvmFactory;
         type ExecutionCtx<'a> = EthBlockExecutionCtx<'a>;
-        type Transaction = R::Transaction;
-        type Receipt = R::Receipt;
+        type Transaction = TransactionSigned;
+        type Receipt = Receipt;
 
         fn evm_factory(&self) -> &Self::EvmFactory {
             &self.inner.evm_factory()
@@ -771,12 +768,12 @@ mod evm {
 
         fn create_executor<'a, DB, I>(
             &'a self,
-            evm: EvmF::Evm<&'a mut State<DB>, I>,
+            evm: <EthEvmFactory as EvmFactory>::Evm<&'a mut State<DB>, I>,
             ctx: Self::ExecutionCtx<'a>,
         ) -> impl BlockExecutorFor<'a, Self, DB, I>
         where
             DB: Database + 'a,
-            I: Inspector<EvmF::Context<&'a mut State<DB>>> + 'a,
+            I: Inspector<<EthEvmFactory as EvmFactory>::Context<&'a mut State<DB>>> + 'a,
         {
             CustomBlockExecutor {
                 inner: EthBlockExecutor::new(
@@ -790,32 +787,17 @@ mod evm {
     }
 
     #[derive(Debug, Clone)]
-    pub struct CustomEvmConfig<EvmF> {
-        pub inner: EthEvmConfig<EvmF>,
-        pub executor_factory: CustomBlockExecutorFactory<RethReceiptBuilder, Arc<ChainSpec>, EvmF>,
+    pub struct CustomEvmConfig {
+        pub inner: EthEvmConfig<EthEvmFactory>,
+        pub executor_factory: CustomBlockExecutorFactory,
         pub assembler: CustomBlockAssembler,
     }
 
-    impl<EvmF> ConfigureEvm for CustomEvmConfig<EvmF>
-    where
-        EvmF: EvmFactory<
-                Tx: TransactionEnv
-                        + FromRecoveredTx<TransactionSigned>
-                        + FromTxWithEncoded<TransactionSigned>,
-                Spec = SpecId,
-                Precompiles = PrecompilesMap,
-            > + Clone
-            + std::fmt::Debug
-            + Send
-            + Sync
-            + Unpin
-            + 'static,
-    {
+    impl ConfigureEvm for CustomEvmConfig {
         type Primitives = EthPrimitives;
         type Error = Infallible;
         type NextBlockEnvCtx = NextBlockEnvAttributes;
-        type BlockExecutorFactory =
-            CustomBlockExecutorFactory<RethReceiptBuilder, Arc<ChainSpec>, EvmF>;
+        type BlockExecutorFactory = CustomBlockExecutorFactory;
         type BlockAssembler = CustomBlockAssembler<ChainSpec>;
 
         fn block_executor_factory(&self) -> &Self::BlockExecutorFactory {

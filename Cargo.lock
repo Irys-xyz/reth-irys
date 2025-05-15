@@ -4872,6 +4872,7 @@ dependencies = [
  "reth-tracing",
  "reth-transaction-pool",
  "reth-trie-db",
+ "revm",
  "serde",
  "serde_json",
  "tokio",

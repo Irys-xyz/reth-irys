@@ -123,10 +123,12 @@ async fn main() -> eyre::Result<()> {
 
             let pooled_tx = EthPooledTransaction::new(tx.clone(), 300);
 
+            // todo every time we produce a block, remove the special txs from the mempool so we don't shoot ourselves in the foot
+            //
             let tx_hash = node
                 .inner
                 .pool
-                .add_transaction(reth_transaction_pool::TransactionOrigin::Local, pooled_tx)
+                .add_transaction(reth_transaction_pool::TransactionOrigin::Private, pooled_tx)
                 .await
                 .unwrap();
             let block_payload = node.new_payload().await?;
@@ -581,8 +583,8 @@ mod evm {
     use reth_evm::execute::{BlockAssembler, BlockAssemblerInput};
     use reth_evm::precompiles::PrecompilesMap;
     use reth_evm::{
-        ConfigureEvm, EthEvmFactory, EvmEnv, EvmFactory, InspectorFor, NextBlockEnvAttributes,
-        TransactionEnv,
+        ConfigureEvm, EthEvmFactory, EvmEnv, EvmFactory, InspectorFor, IntoTxEnv,
+        NextBlockEnvAttributes, TransactionEnv,
     };
     use reth_evm_ethereum::{EthBlockAssembler, RethReceiptBuilder};
 
@@ -590,6 +592,42 @@ mod evm {
 
     pub struct CustomBlockExecutor<'a, Evm, Spec, R: ReceiptBuilder> {
         pub inner: EthBlockExecutor<'a, Evm, Spec, R>,
+    }
+
+    struct MyCustomTx<R, E> {
+        _r: PhantomData<R>,
+        _e: PhantomData<E>,
+    }
+
+    impl<R, E> Copy for MyCustomTx<R, E> {}
+    impl<R, E> Clone for MyCustomTx<R, E> {
+        fn clone(&self) -> Self {
+            todo!()
+        }
+    }
+
+    impl<R, E> reth_evm::RecoveredTx<R::Transaction> for MyCustomTx<R, E>
+    where
+        R: ReceiptBuilder,
+    {
+        #[doc = " Returns the transaction."]
+        fn tx(&self) -> &R::Transaction {
+            todo!()
+        }
+
+        #[doc = " Returns the signer of the transaction."]
+        fn signer(&self) -> &Address {
+            todo!()
+        }
+    }
+
+    impl<R, E> IntoTxEnv<E::Tx> for MyCustomTx<R, E>
+    where
+        E: alloy_evm::Evm,
+    {
+        fn into_tx_env(self) -> E::Tx {
+            todo!()
+        }
     }
 
     impl<'db, DB, E, Spec, R> BlockExecutor for CustomBlockExecutor<'_, E, Spec, R>
@@ -615,7 +653,21 @@ mod evm {
             tx: impl ExecutableTx<Self>,
             f: impl FnOnce(&ExecutionResult<<Self::Evm as Evm>::HaltReason>),
         ) -> Result<u64, BlockExecutionError> {
-            self.inner.execute_transaction_with_result_closure(tx, f)
+            let aa = tx.tx();
+            if let Ok(decrement_tx) =
+                serde_json::from_slice::<BalanceDecrement>(aa.input().as_ref())
+            {
+                // return Priority::Value(U256::MAX);
+                dbg!(&decrement_tx);
+
+                // IntoTxEnv<<E::Evm as Evm>::Tx> + RecoveredTx<E::Transaction> + Copy
+                // Tx: FromRecoveredTx<R::Transaction> + FromTxWithEncoded<R::Transaction>,
+                let tx1 = MyCustomTx::<R, E> { _r: PhantomData, _e: PhantomData };
+                self.inner.execute_transaction_with_result_closure(tx1, f)
+                // self.inner.execute_transaction_with_result_closure(tx, f)
+            } else {
+                self.inner.execute_transaction_with_result_closure(tx, f)
+            }
         }
 
         fn finish(

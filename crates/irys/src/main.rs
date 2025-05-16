@@ -140,7 +140,7 @@ async fn main() -> eyre::Result<()> {
                     to: TxKind::Call(Address::ZERO),
                     input: serde_json::to_vec(&BalanceDecrement {
                         amount_to_decrement_by: U256::ONE,
-                        target: signer_a.address(),
+                        target: Address::random(),
                     })
                     .unwrap()
                     .into(),
@@ -619,7 +619,7 @@ mod evm {
     use reth::revm::primitives::hardfork::SpecId;
     use reth::revm::{Inspector, State};
     use reth_ethereum_primitives::Receipt;
-    use reth_evm::block::{BlockExecutorFactory, BlockExecutorFor};
+    use reth_evm::block::{BlockExecutorFactory, BlockExecutorFor, BlockValidationError};
     use reth_evm::eth::receipt_builder::ReceiptBuilderCtx;
     use reth_evm::eth::spec::EthSpec;
     use reth_evm::eth::{EthBlockExecutionCtx, EthBlockExecutorFactory, EthEvmContext};
@@ -630,7 +630,7 @@ mod evm {
         NextBlockEnvAttributes, TransactionEnv,
     };
     use reth_evm_ethereum::{EthBlockAssembler, RethReceiptBuilder};
-    use revm::context::result::{EVMError, HaltReason, Output};
+    use revm::context::result::{EVMError, HaltReason, InvalidTransaction, Output};
     use revm::context::{BlockEnv, CfgEnv};
     use revm::database::PlainAccount;
     use revm::inspector::NoOpInspector;
@@ -674,60 +674,75 @@ mod evm {
                 let evm = self.inner.evm_mut();
                 let db = evm.db_mut();
                 let state = db.load_cache_account(decrement_tx.target).unwrap();
-                let plain_account = state.account.as_ref().unwrap();
-                let new_account_balance =
-                    if plain_account.info.balance > decrement_tx.amount_to_decrement_by {
-                        plain_account.info.balance - decrement_tx.amount_to_decrement_by
-                    } else {
-                        tracing::error!("user does not have enough balance");
-                        U256::ONE
-                    };
-                let storage = plain_account
-                    .storage
-                    .iter()
-                    .map(|(k, v)| (*k, EvmStorageSlot::new(*v)))
-                    .collect();
-                let mut new_account_info = plain_account.info.clone();
 
-                // Create new account info with updated balance
-                new_account_info.balance = new_account_balance;
-
-                let mut new_state = alloy_primitives::map::foldhash::HashMap::default();
-                new_state.insert(
-                    decrement_tx.target,
-                    Account {
-                        info: new_account_info,
-                        storage,
-                        status: revm::state::AccountStatus::Touched,
-                    },
-                );
-
-                let param_values = DynSolValue::Tuple(vec![
-                    DynSolValue::Uint(decrement_tx.amount_to_decrement_by, 256),
-                    DynSolValue::Address(decrement_tx.target),
-                ]);
-                let encoded_data = param_values.abi_encode();
-                let log = Log {
-                    address: decrement_tx.target,
-                    data: LogData::new(
-                        vec![keccak256("SYSTEM_TX_DECREMENT_BALANCE")],
-                        encoded_data.into(),
-                    )
-                    .unwrap(),
+                // handle a case when an account has never existed (0 balance, no data stored on it)
+                // We don't even create a receipt in this case (eth does the same with native txs)
+                let Some(plain_account) = state.account.as_ref() else {
+                    tracing::warn!("account does not exist");
+                    return Err(BlockExecutionError::Validation(BlockValidationError::InvalidTx {
+                        hash: *aa.hash(),
+                        // todo is there a more appropriate error to use?
+                        error: Box::new(InvalidTransaction::OverflowPaymentInTransaction),
+                    }));
                 };
+
+                // handle a case where the balance of the user is too low
+                let mut new_state = alloy_primitives::map::foldhash::HashMap::default();
+                let execution_result;
+                if plain_account.info.balance < decrement_tx.amount_to_decrement_by {
+                    execution_result =
+                        ExecutionResult::Revert { gas_used: 0, output: Bytes::new() };
+                } else {
+                    // Create new account info with updated balance
+                    let new_account_balance =
+                        plain_account.info.balance - decrement_tx.amount_to_decrement_by;
+                    let storage = plain_account
+                        .storage
+                        .iter()
+                        .map(|(k, v)| (*k, EvmStorageSlot::new(*v)))
+                        .collect();
+                    let mut new_account_info = plain_account.info.clone();
+
+                    new_account_info.balance = new_account_balance;
+                    new_state.insert(
+                        decrement_tx.target,
+                        Account {
+                            info: new_account_info,
+                            storage,
+                            status: revm::state::AccountStatus::Touched,
+                        },
+                    );
+
+                    // generate logs to attach to the receipt
+                    let param_values = DynSolValue::Tuple(vec![
+                        DynSolValue::Uint(decrement_tx.amount_to_decrement_by, 256),
+                        DynSolValue::Address(decrement_tx.target),
+                    ]);
+                    let encoded_data = param_values.abi_encode();
+                    let log = Log {
+                        address: decrement_tx.target,
+                        data: LogData::new(
+                            vec![keccak256("SYSTEM_TX_DECREMENT_BALANCE")],
+                            encoded_data.into(),
+                        )
+                        .unwrap(),
+                    };
+                    execution_result = ExecutionResult::Success {
+                        reason: revm::context::result::SuccessReason::Stop,
+                        gas_used: 0,
+                        gas_refunded: 0,
+                        logs: vec![log],
+                        output: Output::Call(Bytes::new()),
+                    }
+                }
+
                 self.system_call_receipts.push(self.receipt_builder.build_receipt(
                     ReceiptBuilderCtx {
                         tx: tx.tx(),
                         evm,
-                        result: ExecutionResult::Success {
-                            reason: revm::context::result::SuccessReason::Stop,
-                            gas_used: 0,
-                            gas_refunded: 0,
-                            logs: vec![log],
-                            output: Output::Call(Bytes::new()),
-                        },
+                        result: execution_result,
                         state: &new_state,
-                        // cumulative gas used is 0 because system txs are always executed at the beginning of the block, and use up 0 gas
+                        // cumulative gas used is 0 because system txs are always executed at the beginning of the block, and use 0 gas
                         cumulative_gas_used: 0,
                     },
                 ));

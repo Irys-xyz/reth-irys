@@ -8,7 +8,7 @@ use alloy_consensus::{SignableTransaction, TxEip4844, TxLegacy};
 use alloy_eips::{eip7840::BlobParams, merge::EPOCH_SLOTS, Encodable2718};
 use alloy_genesis::Genesis;
 use alloy_network::{EthereumWallet, NetworkWallet};
-use alloy_primitives::{Address, Signature, TxKind, B256, U256};
+use alloy_primitives::{keccak256, Address, Bytes, Log, LogData, Signature, TxKind, B256, U256};
 use alloy_rpc_types::{engine::PayloadAttributes, TransactionInput, TransactionRequest};
 use evm::{CustomBlockAssembler, MyEthEvmFactory};
 use futures::StreamExt;
@@ -109,25 +109,25 @@ async fn main() -> eyre::Result<()> {
             interval.tick().await;
             tracing::info!("start tx sending");
 
-            {
-                // submit a valid tx
-                let mut tx_raw = TxLegacy {
-                    gas_limit: 99000,
-                    value: U256::ZERO,
-                    nonce,
-                    gas_price: 1_000_000_000u128, // 1 Gwei
-                    chain_id: Some(1),
-                    input: vec![123].into(),
-                    to: TxKind::Call(Address::random()),
-                };
-                let pooled_tx = sign_tx(tx_raw, &signer_a).await;
-                let tx_hash = node
-                    .inner
-                    .pool
-                    .add_transaction(reth_transaction_pool::TransactionOrigin::Private, pooled_tx)
-                    .await
-                    .unwrap();
-            }
+            // {
+            //     // submit a valid tx
+            //     let mut tx_raw = TxLegacy {
+            //         gas_limit: 99000,
+            //         value: U256::ZERO,
+            //         nonce,
+            //         gas_price: 1_000_000_000u128, // 1 Gwei
+            //         chain_id: Some(1),
+            //         input: vec![123].into(),
+            //         to: TxKind::Call(Address::random()),
+            //     };
+            //     let pooled_tx = sign_tx(tx_raw, &signer_a).await;
+            //     let tx_hash = node
+            //         .inner
+            //         .pool
+            //         .add_transaction(reth_transaction_pool::TransactionOrigin::Private, pooled_tx)
+            //         .await
+            //         .unwrap();
+            // }
 
             {
                 // submit a valid tx
@@ -605,12 +605,13 @@ mod evm {
     use std::convert::Infallible;
 
     use alloy_consensus::{Block, Header, Transaction, TxReceipt};
+    use alloy_dyn_abi::{DynSolType, DynSolValue};
     use alloy_evm::block::{BlockExecutionError, BlockExecutor, ExecutableTx, OnStateHook};
     use alloy_evm::eth::receipt_builder::ReceiptBuilder;
     use alloy_evm::eth::spec::EthExecutorSpec;
     use alloy_evm::eth::EthBlockExecutor;
     use alloy_evm::{Database, Evm, FromRecoveredTx, FromTxWithEncoded};
-    use alloy_primitives::{keccak256, Bytes, Log, LogData};
+    use alloy_primitives::{keccak256, Bytes, Log, LogData, Uint};
     use reth::primitives::{SealedBlock, SealedHeader};
     use reth::providers::BlockExecutionResult;
     use reth::revm::context::result::ExecutionResult;
@@ -701,12 +702,16 @@ mod evm {
                     },
                 );
 
-                // Push transaction changeset and calculate header bloom filter for receipt.
+                let param_values = DynSolValue::Tuple(vec![
+                    DynSolValue::Uint(decrement_tx.amount_to_decrement_by, 256),
+                    DynSolValue::Address(decrement_tx.target),
+                ]);
+                let encoded_data = param_values.abi_encode();
                 let log = Log {
                     address: decrement_tx.target,
                     data: LogData::new(
                         vec![keccak256("SYSTEM_TX_DECREMENT_BALANCE")],
-                        Bytes::new(), // todo: decrement_tx.target , decrement_tx.amount,
+                        encoded_data.into(),
                     )
                     .unwrap(),
                 };

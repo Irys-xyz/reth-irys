@@ -20,6 +20,7 @@ alloy-rpc-types.workspace = true
 alloy-rpc-types-eth.workspace = true
 alloy-eips.workspace = true
 alloy-evm.workspace = true
+alloy-dyn-abi.workspace = true
 alloy-consensus.workspace = true
 alloy-network.workspace = true
 reth.workspace = true

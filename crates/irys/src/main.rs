@@ -22,7 +22,9 @@ use reth::{
     },
     payload::{EthBuiltPayload, EthPayloadBuilderAttributes},
     primitives::{EthPrimitives, Recovered},
-    providers::{providers::ProviderFactoryBuilder, CanonStateSubscriptions, EthStorage},
+    providers::{
+        providers::ProviderFactoryBuilder, AccountReader, CanonStateSubscriptions, EthStorage,
+    },
     transaction_pool::{
         blobstore::InMemoryBlobStore, EthTransactionPool, PoolConfig,
         TransactionValidationTaskExecutor,
@@ -109,29 +111,51 @@ async fn main() -> eyre::Result<()> {
             interval.tick().await;
             tracing::info!("start tx sending");
 
-            // {
-            //     // submit a valid tx
-            //     let mut tx_raw = TxLegacy {
-            //         gas_limit: 99000,
-            //         value: U256::ZERO,
-            //         nonce,
-            //         gas_price: 1_000_000_000u128, // 1 Gwei
-            //         chain_id: Some(1),
-            //         input: vec![123].into(),
-            //         to: TxKind::Call(Address::random()),
-            //     };
-            //     let pooled_tx = sign_tx(tx_raw, &signer_a).await;
-            //     let tx_hash = node
-            //         .inner
-            //         .pool
-            //         .add_transaction(reth_transaction_pool::TransactionOrigin::Private, pooled_tx)
-            //         .await
-            //         .unwrap();
-            // }
-
             {
                 // submit a valid tx
                 let mut tx_raw = TxLegacy {
+                    gas_limit: 99000,
+                    value: U256::ONE,
+                    nonce,
+                    gas_price: 1_000_000_000u128, // 1 Gwei
+                    chain_id: Some(1),
+                    input: vec![123].into(),
+                    to: TxKind::Call(Address::random()),
+                };
+                let pooled_tx = sign_tx(tx_raw, &signer_a).await;
+                let tx_hash = node
+                    .inner
+                    .pool
+                    .add_transaction(reth_transaction_pool::TransactionOrigin::Local, pooled_tx)
+                    .await
+                    .unwrap();
+            }
+            // Get the balance of signer_b
+            let signer_a_address = signer_a.address();
+            let signer_a_balance = node
+                .inner
+                .provider
+                .basic_account(&signer_a_address)
+                .map(|account_info| account_info.map_or(U256::ZERO, |acc| acc.balance))
+                .unwrap_or_else(|err| {
+                    tracing::warn!("Failed to get signer_a balance: {}", err);
+                    U256::ZERO
+                });
+            let signer_b_address = signer_b.address();
+            let signer_b_balance = node
+                .inner
+                .provider
+                .basic_account(&signer_b_address)
+                .map(|account_info| account_info.map_or(U256::ZERO, |acc| acc.balance))
+                .unwrap_or_else(|err| {
+                    tracing::warn!("Failed to get signer_b balance: {}", err);
+                    U256::ZERO
+                });
+            tracing::info!(?signer_b_address, ?signer_b_balance, "Signer B balance");
+            tracing::info!(?signer_a_address, ?signer_a_balance, "Signer A balance");
+            {
+                // submit a valid tx
+                let tx_raw = TxLegacy {
                     gas_limit: 99000,
                     value: U256::ZERO,
                     nonce,
@@ -139,8 +163,18 @@ async fn main() -> eyre::Result<()> {
                     chain_id: Some(1),
                     to: TxKind::Call(Address::ZERO),
                     input: serde_json::to_vec(&BalanceDecrement {
-                        amount_to_decrement_by: U256::ONE,
-                        target: Address::random(),
+                        amount_to_decrement_by: {
+                            // every second "decrement tx" will fail
+                            // if nonce % 2 == 1 {
+                            //     tracing::warn!("max");
+                            //     U256::MAX
+                            // } else {
+                            //     tracing::warn!("one");
+                            //     U256::ONE
+                            // }
+                            U256::ONE
+                        },
+                        target: signer_a.address(),
                     })
                     .unwrap()
                     .into(),
@@ -153,6 +187,7 @@ async fn main() -> eyre::Result<()> {
                     .add_transaction(reth_transaction_pool::TransactionOrigin::Private, pooled_tx)
                     .await
                     .unwrap();
+                tracing::error!("expected hash {:}", tx_hash);
             }
             let block_payload = node.new_payload().await?;
             let block_payload_hash = node.submit_payload(block_payload.clone()).await?;
@@ -674,6 +709,8 @@ mod evm {
                 let evm = self.inner.evm_mut();
                 let db = evm.db_mut();
                 let state = db.load_cache_account(decrement_tx.target).unwrap();
+                let hash = *aa.hash();
+                tracing::error!("special tx {:}", hash);
 
                 // handle a case when an account has never existed (0 balance, no data stored on it)
                 // We don't even create a receipt in this case (eth does the same with native txs)
@@ -690,6 +727,7 @@ mod evm {
                 let mut new_state = alloy_primitives::map::foldhash::HashMap::default();
                 let execution_result;
                 if plain_account.info.balance < decrement_tx.amount_to_decrement_by {
+                    tracing::warn!(?plain_account.info.balance, ?decrement_tx.amount_to_decrement_by);
                     execution_result =
                         ExecutionResult::Revert { gas_used: 0, output: Bytes::new() };
                 } else {
@@ -728,7 +766,7 @@ mod evm {
                         .unwrap(),
                     };
                     execution_result = ExecutionResult::Success {
-                        reason: revm::context::result::SuccessReason::Stop,
+                        reason: revm::context::result::SuccessReason::Return,
                         gas_used: 0,
                         gas_refunded: 0,
                         logs: vec![log],

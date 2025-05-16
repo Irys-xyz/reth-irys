@@ -140,7 +140,7 @@ async fn main() -> eyre::Result<()> {
                     to: TxKind::Call(Address::ZERO),
                     input: serde_json::to_vec(&BalanceDecrement {
                         amount_to_decrement_by: U256::ONE,
-                        target: Address::random(),
+                        target: signer_a.address(),
                     })
                     .unwrap()
                     .into(),
@@ -553,7 +553,7 @@ where
         base_fee: u64,
     ) -> Priority<Self::PriorityValue> {
         let bytes = transaction.input();
-        if let Ok(_system_tx) = serde_json::from_slice::<BalanceDecrement>(bytes.as_ref()) {
+        if let Ok(_decrement_tx) = serde_json::from_slice::<BalanceDecrement>(bytes.as_ref()) {
             return Priority::Value(U256::MAX);
         }
         transaction.effective_tip_per_gas(base_fee).map(U256::from).into()
@@ -610,7 +610,7 @@ mod evm {
     use alloy_evm::eth::spec::EthExecutorSpec;
     use alloy_evm::eth::EthBlockExecutor;
     use alloy_evm::{Database, Evm, FromRecoveredTx, FromTxWithEncoded};
-    use alloy_primitives::{Bytes, Log};
+    use alloy_primitives::{keccak256, Bytes, Log, LogData};
     use reth::primitives::{SealedBlock, SealedHeader};
     use reth::providers::BlockExecutionResult;
     use reth::revm::context::result::ExecutionResult;
@@ -619,6 +619,7 @@ mod evm {
     use reth::revm::{Inspector, State};
     use reth_ethereum_primitives::Receipt;
     use reth_evm::block::{BlockExecutorFactory, BlockExecutorFor};
+    use reth_evm::eth::receipt_builder::ReceiptBuilderCtx;
     use reth_evm::eth::spec::EthSpec;
     use reth_evm::eth::{EthBlockExecutionCtx, EthBlockExecutorFactory, EthEvmContext};
     use reth_evm::execute::{BlockAssembler, BlockAssemblerInput};
@@ -628,52 +629,20 @@ mod evm {
         NextBlockEnvAttributes, TransactionEnv,
     };
     use reth_evm_ethereum::{EthBlockAssembler, RethReceiptBuilder};
-    use revm::context::result::{EVMError, HaltReason};
+    use revm::context::result::{EVMError, HaltReason, Output};
     use revm::context::{BlockEnv, CfgEnv};
+    use revm::database::PlainAccount;
     use revm::inspector::NoOpInspector;
     use revm::precompile::{PrecompileSpecId, Precompiles};
-    use revm::{MainBuilder, MainContext};
+    use revm::state::{Account, EvmStorageSlot};
+    use revm::{DatabaseCommit, MainBuilder, MainContext};
 
     use super::*;
 
     pub struct CustomBlockExecutor<'a, Evm> {
+        receipt_builder: &'a RethReceiptBuilder,
+        system_call_receipts: Vec<Receipt>,
         pub inner: EthBlockExecutor<'a, Evm, &'a Arc<ChainSpec>, &'a RethReceiptBuilder>,
-    }
-
-    struct MyCustomTx<R, E> {
-        _r: PhantomData<R>,
-        _e: PhantomData<E>,
-    }
-
-    impl<R, E> Copy for MyCustomTx<R, E> {}
-    impl<R, E> Clone for MyCustomTx<R, E> {
-        fn clone(&self) -> Self {
-            todo!()
-        }
-    }
-
-    impl<R, E> reth_evm::RecoveredTx<R::Transaction> for MyCustomTx<R, E>
-    where
-        R: ReceiptBuilder,
-    {
-        #[doc = " Returns the transaction."]
-        fn tx(&self) -> &R::Transaction {
-            todo!()
-        }
-
-        #[doc = " Returns the signer of the transaction."]
-        fn signer(&self) -> &Address {
-            todo!()
-        }
-    }
-
-    impl<R, E> IntoTxEnv<E::Tx> for MyCustomTx<R, E>
-    where
-        E: alloy_evm::Evm,
-    {
-        fn into_tx_env(self) -> E::Tx {
-            todo!()
-        }
     }
 
     impl<'db, DB, E> BlockExecutor for CustomBlockExecutor<'_, E>
@@ -701,28 +670,69 @@ mod evm {
             if let Ok(decrement_tx) =
                 serde_json::from_slice::<BalanceDecrement>(aa.input().as_ref())
             {
-                let tx2 = Recovered::new_unchecked(
-                    TransactionSigned::Legacy(alloy_consensus::Signed::new_unhashed(
-                        TxLegacy {
-                            chain_id: aa.chain_id(),
-                            nonce: aa.nonce(),
-                            gas_price: aa.gas_price().unwrap(),
-                            gas_limit: aa.gas_limit(),
-                            to: TxKind::Call(decrement_tx.target),
-                            value: decrement_tx.amount_to_decrement_by,
-                            input: Bytes::new(),
-                        },
-                        Signature::new(U256::ZERO, U256::ZERO, true),
-                    )),
+                let evm = self.inner.evm_mut();
+                let db = evm.db_mut();
+                let state = db.load_cache_account(decrement_tx.target).unwrap();
+                let plain_account = state.account.as_ref().unwrap();
+                let new_account_balance =
+                    if plain_account.info.balance > decrement_tx.amount_to_decrement_by {
+                        plain_account.info.balance - decrement_tx.amount_to_decrement_by
+                    } else {
+                        tracing::error!("user does not have enough balance");
+                        U256::ONE
+                    };
+                let storage = plain_account
+                    .storage
+                    .iter()
+                    .map(|(k, v)| (*k, EvmStorageSlot::new(*v)))
+                    .collect();
+                let mut new_account_info = plain_account.info.clone();
+
+                // Create new account info with updated balance
+                new_account_info.balance = new_account_balance;
+
+                let mut new_state = alloy_primitives::map::foldhash::HashMap::default();
+                new_state.insert(
                     decrement_tx.target,
+                    Account {
+                        info: new_account_info,
+                        storage,
+                        status: revm::state::AccountStatus::Touched,
+                    },
                 );
 
-                dbg!("about to exec");
-                dbg!(&tx2);
-                let res = self.inner.execute_transaction_with_result_closure(&tx2, f);
-                // res.map_err()
-                dbg!(&res);
-                res
+                // Push transaction changeset and calculate header bloom filter for receipt.
+                let log = Log {
+                    address: decrement_tx.target,
+                    data: LogData::new(
+                        vec![keccak256("SYSTEM_TX_DECREMENT_BALANCE")],
+                        Bytes::new(), // todo: decrement_tx.target , decrement_tx.amount,
+                    )
+                    .unwrap(),
+                };
+                self.system_call_receipts.push(self.receipt_builder.build_receipt(
+                    ReceiptBuilderCtx {
+                        tx: tx.tx(),
+                        evm,
+                        result: ExecutionResult::Success {
+                            reason: revm::context::result::SuccessReason::Stop,
+                            gas_used: 0,
+                            gas_refunded: 0,
+                            logs: vec![log],
+                            output: Output::Call(Bytes::new()),
+                        },
+                        state: &new_state,
+                        // cumulative gas used is 0 because system txs are always executed at the beginning of the block, and use up 0 gas
+                        cumulative_gas_used: 0,
+                    },
+                ));
+
+                // Commit the changes to the database
+                let evm = self.inner.evm_mut();
+                let db = evm.db_mut();
+                db.commit(new_state);
+
+                Ok(0)
             } else {
                 let res = self.inner.execute_transaction_with_result_closure(tx, f);
                 dbg!(&res);
@@ -731,7 +741,11 @@ mod evm {
         }
 
         fn finish(self) -> Result<(Self::Evm, BlockExecutionResult<Receipt>), BlockExecutionError> {
-            self.inner.finish()
+            let (evm, mut block_res) = self.inner.finish()?;
+            let total_receipts = [self.system_call_receipts, block_res.receipts].concat();
+            block_res.receipts = total_receipts;
+
+            Ok((evm, block_res))
         }
 
         fn set_state_hook(&mut self, hook: Option<Box<dyn OnStateHook>>) {
@@ -837,6 +851,8 @@ mod evm {
             let receipt_builder = self.inner.receipt_builder();
             CustomBlockExecutor {
                 inner: EthBlockExecutor::new(evm, ctx, self.inner.spec(), receipt_builder),
+                receipt_builder,
+                system_call_receipts: vec![],
             }
         }
     }

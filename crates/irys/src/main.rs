@@ -7,12 +7,15 @@ use std::{
 use alloy_consensus::{SignableTransaction, TxEip4844, TxLegacy};
 use alloy_eips::{eip7840::BlobParams, merge::EPOCH_SLOTS, Encodable2718};
 use alloy_genesis::Genesis;
-use alloy_network::EthereumWallet;
+use alloy_network::{EthereumWallet, NetworkWallet};
 use alloy_primitives::{Address, Signature, TxKind, B256, U256};
 use alloy_rpc_types::{engine::PayloadAttributes, TransactionInput, TransactionRequest};
-use evm::CustomBlockAssembler;
+use evm::{CustomBlockAssembler, MyEthEvmFactory};
+use futures::StreamExt;
 use reth::{
-    api::{FullNodeComponents, FullNodeTypes, NodePrimitives, NodeTypes, PayloadTypes},
+    api::{
+        BuiltPayload, FullNodeComponents, FullNodeTypes, NodePrimitives, NodeTypes, PayloadTypes,
+    },
     builder::{
         components::{BasicPayloadServiceBuilder, ComponentsBuilder, ExecutorBuilder, PoolBuilder},
         BuilderContext, DebugNode, Node, NodeAdapter, NodeComponentsBuilder, PayloadBuilderConfig,
@@ -26,7 +29,7 @@ use reth::{
     },
 };
 use reth_chainspec::{ChainSpec, EthChainSpec, EthereumHardforks};
-use reth_e2e_test_utils::{setup, transaction::TransactionTestContext};
+use reth_e2e_test_utils::{setup, transaction::TransactionTestContext, wallet::Wallet};
 use reth_ethereum_engine_primitives::EthPayloadAttributes;
 use reth_ethereum_primitives::TransactionSigned;
 use reth_evm::EthEvmFactory;
@@ -82,6 +85,7 @@ async fn main() -> eyre::Result<()> {
 
     let (mut nodes, _tasks, wallet) =
         setup::<IrysEthereumNode>(1, custom_chain(), false, eth_payload_attributes).await?;
+    let wallets = Wallet::new(3).wallet_gen();
 
     let mut node = nodes.pop().unwrap();
     let mut node_engine_api_events = node.inner.provider.canonical_state_stream();
@@ -95,55 +99,76 @@ async fn main() -> eyre::Result<()> {
         if false {
             return eyre::Result::<_, eyre::Report>::Ok(());
         }
+        let signer_a = EthereumWallet::from(wallets[1].clone());
+        let signer_a = signer_a.default_signer();
+
+        let signer_b = EthereumWallet::from(wallet.inner.clone());
+        let signer_b = signer_b.default_signer();
 
         loop {
             interval.tick().await;
             tracing::info!("start tx sending");
 
-            // Make the first node advance
-            let mut tx_raw = TxLegacy {
-                gas_limit: 99000,
-                value: U256::from(100),
-                nonce,
-                gas_price: 1_000_000_000u128, // 1 Gwei
-                chain_id: Some(1),
-                input: serde_json::to_vec(&BalanceDecrement {
-                    amount_to_decrement_by: U256::ONE,
-                    target: wallet.inner.address(),
-                })
-                .unwrap()
-                .into(),
-                ..Default::default()
-            };
-            let signer = EthereumWallet::from(wallet.inner.clone());
-            let signed_tx = signer.default_signer().sign_transaction(&mut tx_raw).await.unwrap();
-            let tx = alloy_consensus::EthereumTxEnvelope::Legacy(tx_raw.into_signed(signed_tx))
-                .try_into_recovered()
-                .unwrap();
+            {
+                // submit a valid tx
+                let mut tx_raw = TxLegacy {
+                    gas_limit: 99000,
+                    value: U256::ZERO,
+                    nonce,
+                    gas_price: 1_000_000_000u128, // 1 Gwei
+                    chain_id: Some(1),
+                    input: vec![123].into(),
+                    to: TxKind::Call(Address::random()),
+                };
+                let pooled_tx = sign_tx(tx_raw, &signer_a).await;
+                let tx_hash = node
+                    .inner
+                    .pool
+                    .add_transaction(reth_transaction_pool::TransactionOrigin::Private, pooled_tx)
+                    .await
+                    .unwrap();
+            }
 
-            let pooled_tx = EthPooledTransaction::new(tx.clone(), 300);
-
-            // todo every time we produce a block, remove the special txs from the mempool so we don't shoot ourselves in the foot
-            //
-            let tx_hash = node
-                .inner
-                .pool
-                .add_transaction(reth_transaction_pool::TransactionOrigin::Private, pooled_tx)
-                .await
-                .unwrap();
+            {
+                // submit a valid tx
+                let mut tx_raw = TxLegacy {
+                    gas_limit: 99000,
+                    value: U256::ZERO,
+                    nonce,
+                    gas_price: 1_000_000_000u128, // 1 Gwei
+                    chain_id: Some(1),
+                    to: TxKind::Call(Address::ZERO),
+                    input: serde_json::to_vec(&BalanceDecrement {
+                        amount_to_decrement_by: U256::ONE,
+                        target: Address::random(),
+                    })
+                    .unwrap()
+                    .into(),
+                    ..Default::default()
+                };
+                let pooled_tx = sign_tx(tx_raw, &signer_b).await;
+                let tx_hash = node
+                    .inner
+                    .pool
+                    .add_transaction(reth_transaction_pool::TransactionOrigin::Private, pooled_tx)
+                    .await
+                    .unwrap();
+            }
             let block_payload = node.new_payload().await?;
             let block_payload_hash = node.submit_payload(block_payload.clone()).await?;
-            // trigger forkchoice update via engine api to commit the block to the blockchain
+            // // trigger forkchoice update via engine api to commit the block to the blockchain
             node.update_forkchoice(block_payload_hash, block_payload_hash).await?;
+            let outcome = node.inner.provider.get_state(0..=1).unwrap().unwrap();
+            tracing::info!(?outcome.receipts);
 
-            // assert that the tx is included in the block
-            let header = block_payload.block().header();
-            node.assert_new_block(tx_hash, block_payload_hash, header.number).await?;
+            // // assert that the tx is included in the block
+            // let header = block_payload.block().header();
+            // node.assert_new_block(tx_hash, block_payload_hash, header.number).await?;
 
             // print out the transactions that were included in the block
-            let body = block_payload.block().body();
-            let txs = &body.transactions;
-            tracing::info!(?txs);
+            // let body = block_payload.block().body();
+            // let txs = &body.transactions;
+            // tracing::info!(?txs);
 
             nonce += 1;
         }
@@ -178,6 +203,20 @@ async fn main() -> eyre::Result<()> {
         }
     }
     Ok(())
+}
+
+async fn sign_tx(
+    mut tx_raw: TxLegacy,
+    new_signer: &Arc<dyn alloy_network::TxSigner<Signature> + Send + Sync>,
+) -> EthPooledTransaction<alloy_consensus::EthereumTxEnvelope<TxEip4844>> {
+    let signed_tx = new_signer.sign_transaction(&mut tx_raw).await.unwrap();
+    let tx = alloy_consensus::EthereumTxEnvelope::Legacy(tx_raw.into_signed(signed_tx))
+        .try_into_recovered()
+        .unwrap();
+
+    let pooled_tx = EthPooledTransaction::new(tx.clone(), 300);
+
+    return pooled_tx;
 }
 
 fn custom_chain() -> Arc<ChainSpec> {
@@ -548,13 +587,14 @@ where
         let evm_config = EthEvmConfig::new(ctx.chain_spec())
             .with_extra_data(ctx.payload_builder_config().extra_data_bytes());
         let spec = ctx.chain_spec();
+        let evm_factory = MyEthEvmFactory::default();
         let evm_config = evm::CustomEvmConfig {
             inner: evm_config,
             assembler: CustomBlockAssembler::new(ctx.chain_spec()),
             executor_factory: evm::CustomBlockExecutorFactory::new(
                 RethReceiptBuilder::default(),
                 spec,
-                EthEvmFactory::default(),
+                evm_factory,
             ),
         };
         Ok(evm_config)
@@ -580,14 +620,19 @@ mod evm {
     use reth_ethereum_primitives::Receipt;
     use reth_evm::block::{BlockExecutorFactory, BlockExecutorFor};
     use reth_evm::eth::spec::EthSpec;
-    use reth_evm::eth::{EthBlockExecutionCtx, EthBlockExecutorFactory};
+    use reth_evm::eth::{EthBlockExecutionCtx, EthBlockExecutorFactory, EthEvmContext};
     use reth_evm::execute::{BlockAssembler, BlockAssemblerInput};
     use reth_evm::precompiles::PrecompilesMap;
     use reth_evm::{
-        ConfigureEvm, EthEvmFactory, EvmEnv, EvmFactory, InspectorFor, IntoTxEnv,
+        ConfigureEvm, EthEvm, EthEvmFactory, EvmEnv, EvmFactory, InspectorFor, IntoTxEnv,
         NextBlockEnvAttributes, TransactionEnv,
     };
     use reth_evm_ethereum::{EthBlockAssembler, RethReceiptBuilder};
+    use revm::context::result::{EVMError, HaltReason};
+    use revm::context::{BlockEnv, CfgEnv};
+    use revm::inspector::NoOpInspector;
+    use revm::precompile::{PrecompileSpecId, Precompiles};
+    use revm::{MainBuilder, MainContext};
 
     use super::*;
 
@@ -672,11 +717,16 @@ mod evm {
                     decrement_tx.target,
                 );
 
+                dbg!("about to exec");
+                dbg!(&tx2);
                 let res = self.inner.execute_transaction_with_result_closure(&tx2, f);
+                // res.map_err()
                 dbg!(&res);
                 res
             } else {
-                self.inner.execute_transaction_with_result_closure(tx, f)
+                let res = self.inner.execute_transaction_with_result_closure(tx, f);
+                dbg!(&res);
+                res
             }
         }
 
@@ -732,7 +782,7 @@ mod evm {
     /// Ethereum block executor factory.
     #[derive(Debug, Clone, Default)]
     pub struct CustomBlockExecutorFactory {
-        inner: EthBlockExecutorFactory<RethReceiptBuilder, Arc<ChainSpec>, EthEvmFactory>,
+        inner: EthBlockExecutorFactory<RethReceiptBuilder, Arc<ChainSpec>, MyEthEvmFactory>,
     }
 
     impl CustomBlockExecutorFactory {
@@ -741,7 +791,7 @@ mod evm {
         pub const fn new(
             receipt_builder: RethReceiptBuilder,
             spec: Arc<ChainSpec>,
-            evm_factory: EthEvmFactory,
+            evm_factory: MyEthEvmFactory,
         ) -> Self {
             Self { inner: EthBlockExecutorFactory::new(receipt_builder, spec, evm_factory) }
         }
@@ -757,7 +807,7 @@ mod evm {
         }
 
         /// Exposes the EVM factory.
-        pub const fn evm_factory(&self) -> &EthEvmFactory {
+        pub const fn evm_factory(&self) -> &MyEthEvmFactory {
             self.inner.evm_factory()
         }
     }
@@ -766,7 +816,7 @@ mod evm {
     where
         Self: 'static,
     {
-        type EvmFactory = EthEvmFactory;
+        type EvmFactory = MyEthEvmFactory;
         type ExecutionCtx<'a> = EthBlockExecutionCtx<'a>;
         type Transaction = TransactionSigned;
         type Receipt = Receipt;
@@ -777,7 +827,7 @@ mod evm {
 
         fn create_executor<'a, DB, I>(
             &'a self,
-            evm: <EthEvmFactory as EvmFactory>::Evm<&'a mut State<DB>, I>,
+            evm: <MyEthEvmFactory as EvmFactory>::Evm<&'a mut State<DB>, I>,
             ctx: Self::ExecutionCtx<'a>,
         ) -> impl BlockExecutorFor<'a, Self, DB, I>
         where
@@ -838,6 +888,56 @@ mod evm {
             attributes: Self::NextBlockEnvCtx,
         ) -> EthBlockExecutionCtx<'_> {
             self.inner.context_for_next_block(parent, attributes)
+        }
+    }
+
+    /// Factory producing [`EthEvm`].
+    #[derive(Debug, Default, Clone, Copy)]
+    #[non_exhaustive]
+    pub struct MyEthEvmFactory;
+
+    impl EvmFactory for MyEthEvmFactory {
+        type Evm<DB: Database, I: Inspector<EthEvmContext<DB>>> = EthEvm<DB, I, Self::Precompiles>;
+        type Context<DB: Database> = revm::Context<BlockEnv, TxEnv, CfgEnv, DB>;
+        type Tx = TxEnv;
+        type Error<DBError: core::error::Error + Send + Sync + 'static> = EVMError<DBError>;
+        type HaltReason = HaltReason;
+        type Spec = SpecId;
+        type Precompiles = PrecompilesMap;
+
+        fn create_evm<DB: Database>(&self, db: DB, input: EvmEnv) -> Self::Evm<DB, NoOpInspector> {
+            let spec_id = input.cfg_env.spec;
+            EthEvm::new(
+                revm::Context::mainnet()
+                    .with_block(input.block_env)
+                    .with_cfg(input.cfg_env)
+                    .with_db(db)
+                    .build_mainnet_with_inspector(NoOpInspector {})
+                    .with_precompiles(PrecompilesMap::from_static(Precompiles::new(
+                        PrecompileSpecId::from_spec_id(spec_id),
+                    ))),
+                false,
+            )
+        }
+
+        fn create_evm_with_inspector<DB: Database, I: Inspector<Self::Context<DB>>>(
+            &self,
+            db: DB,
+            input: EvmEnv,
+            inspector: I,
+        ) -> Self::Evm<DB, I> {
+            let spec_id = input.cfg_env.spec;
+            EthEvm::new(
+                revm::Context::mainnet()
+                    .with_block(input.block_env)
+                    .with_cfg(input.cfg_env)
+                    .with_db(db)
+                    .build_mainnet_with_inspector(inspector)
+                    .with_precompiles(PrecompilesMap::from_static(Precompiles::new(
+                        PrecompileSpecId::from_spec_id(spec_id),
+                    ))),
+                true,
+            )
         }
     }
 }

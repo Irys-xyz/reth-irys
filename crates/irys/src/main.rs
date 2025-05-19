@@ -74,6 +74,12 @@ struct BalanceDecrement {
     target: Address,
 }
 
+// todo: balance increments (releasing stake, block rewads); decerments (staking, commitment, storage fees);
+// todo: get rid of json, use encode / decode traits (look at shadows)
+// todo: nonce update
+// todo: write tests
+// todo: see how 2 nodes behave
+
 #[tokio::main]
 async fn main() -> eyre::Result<()> {
     let _ = RethTracer::new()
@@ -111,9 +117,6 @@ async fn main() -> eyre::Result<()> {
             interval.tick().await;
             tracing::info!("start tx sending");
 
-            // todo current issues:
-            // - our custom tx does not get processed on subsequent calls (does it get stuck in mempol or not accepted by the mempool? )
-            // - if we *only* provide our custom tx, then the whole node crashes on the second call attempt
             // {
             //     // submit a valid tx
             //     let mut tx_raw = TxLegacy {
@@ -161,7 +164,7 @@ async fn main() -> eyre::Result<()> {
                 let tx_raw = TxLegacy {
                     gas_limit: 99000,
                     value: U256::ZERO,
-                    nonce: 0,
+                    nonce,
                     gas_price: 1_000_000_000u128, // 1 Gwei
                     chain_id: Some(1),
                     to: TxKind::Call(Address::ZERO),
@@ -204,9 +207,9 @@ async fn main() -> eyre::Result<()> {
             // node.assert_new_block(tx_hash, block_payload_hash, header.number).await?;
 
             // print out the transactions that were included in the block
-            // let body = block_payload.block().body();
-            // let txs = &body.transactions;
-            // tracing::info!(?txs);
+            let body = block_payload.block().body();
+            let txs = &body.transactions;
+            tracing::info!(?txs);
 
             nonce += 1;
         }
@@ -706,11 +709,56 @@ mod evm {
             f: impl FnOnce(&ExecutionResult<<Self::Evm as Evm>::HaltReason>),
         ) -> Result<u64, BlockExecutionError> {
             let aa = tx.tx();
+
             if let Ok(decrement_tx) =
+                // todo exepriments how to prevent user from producing this
+                // todo can we get the block producer here
                 serde_json::from_slice::<BalanceDecrement>(aa.input().as_ref())
             {
+                // handle the signer nonce incerment
+                {
+                    let evm = self.inner.evm_mut();
+                    let db = evm.db_mut();
+                    {
+                        let signer = tx.signer();
+                        dbg!(&signer);
+                        let state = db.load_cache_account(*signer).unwrap();
+                        let Some(plain_account) = state.account.as_ref() else {
+                            tracing::warn!("account does not exist");
+                            return Err(BlockExecutionError::Validation(
+                                BlockValidationError::InvalidTx {
+                                    hash: *aa.hash(),
+                                    // todo is there a more appropriate error to use?
+                                    error: Box::new(
+                                        InvalidTransaction::OverflowPaymentInTransaction,
+                                    ),
+                                },
+                            ));
+                        };
+                        let mut new_state = alloy_primitives::map::foldhash::HashMap::default();
+                        let storage = plain_account
+                            .storage
+                            .iter()
+                            .map(|(k, v)| (*k, EvmStorageSlot::new(*v)))
+                            .collect();
+                        let mut new_account_info = plain_account.info.clone();
+                        new_account_info.set_nonce(aa.nonce() + 1);
+
+                        new_state.insert(
+                            *signer,
+                            Account {
+                                info: new_account_info,
+                                storage,
+                                status: revm::state::AccountStatus::Touched,
+                            },
+                        );
+                        db.commit(new_state);
+                    }
+                }
+
                 let evm = self.inner.evm_mut();
                 let db = evm.db_mut();
+
                 let state = db.load_cache_account(decrement_tx.target).unwrap();
                 let hash = *aa.hash();
                 tracing::error!("special tx {:}", hash);
@@ -743,7 +791,6 @@ mod evm {
                         .map(|(k, v)| (*k, EvmStorageSlot::new(*v)))
                         .collect();
                     let mut new_account_info = plain_account.info.clone();
-                    new_account_info.nonce = new_account_info.nonce.saturating_add(1);
 
                     new_account_info.balance = new_account_balance;
                     new_state.insert(
@@ -793,6 +840,7 @@ mod evm {
                 // Commit the changes to the database
                 let evm = self.inner.evm_mut();
                 let db = evm.db_mut();
+                // todo test revert
                 db.commit(new_state);
 
                 Ok(0)

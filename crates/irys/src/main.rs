@@ -80,7 +80,7 @@ async fn main() -> eyre::Result<()> {
         .with_stdout(LayerInfo::new(
             LogFormat::Terminal,
             LevelFilter::INFO.to_string(),
-            "".to_string(),
+            "reth_transaction_pool=debug".to_string(),
             Some("always".to_string()),
         ))
         .init();
@@ -111,25 +111,28 @@ async fn main() -> eyre::Result<()> {
             interval.tick().await;
             tracing::info!("start tx sending");
 
-            {
-                // submit a valid tx
-                let mut tx_raw = TxLegacy {
-                    gas_limit: 99000,
-                    value: U256::ONE,
-                    nonce,
-                    gas_price: 1_000_000_000u128, // 1 Gwei
-                    chain_id: Some(1),
-                    input: vec![123].into(),
-                    to: TxKind::Call(Address::random()),
-                };
-                let pooled_tx = sign_tx(tx_raw, &signer_a).await;
-                let tx_hash = node
-                    .inner
-                    .pool
-                    .add_transaction(reth_transaction_pool::TransactionOrigin::Local, pooled_tx)
-                    .await
-                    .unwrap();
-            }
+            // todo current issues:
+            // - our custom tx does not get processed on subsequent calls (does it get stuck in mempol or not accepted by the mempool? )
+            // - if we *only* provide our custom tx, then the whole node crashes on the second call attempt
+            // {
+            //     // submit a valid tx
+            //     let mut tx_raw = TxLegacy {
+            //         gas_limit: 99000,
+            //         value: U256::ZERO,
+            //         nonce,
+            //         gas_price: 1_000_000_000u128, // 1 Gwei
+            //         chain_id: Some(1),
+            //         input: vec![123].into(),
+            //         to: TxKind::Call(Address::random()),
+            //     };
+            //     let pooled_tx = sign_tx(tx_raw, &signer_a).await;
+            //     let tx_hash = node
+            //         .inner
+            //         .pool
+            //         .add_transaction(reth_transaction_pool::TransactionOrigin::Local, pooled_tx)
+            //         .await
+            //         .unwrap();
+            // }
             // Get the balance of signer_b
             let signer_a_address = signer_a.address();
             let signer_a_balance = node
@@ -158,7 +161,7 @@ async fn main() -> eyre::Result<()> {
                 let tx_raw = TxLegacy {
                     gas_limit: 99000,
                     value: U256::ZERO,
-                    nonce,
+                    nonce: 0,
                     gas_price: 1_000_000_000u128, // 1 Gwei
                     chain_id: Some(1),
                     to: TxKind::Call(Address::ZERO),
@@ -740,6 +743,7 @@ mod evm {
                         .map(|(k, v)| (*k, EvmStorageSlot::new(*v)))
                         .collect();
                     let mut new_account_info = plain_account.info.clone();
+                    new_account_info.nonce = new_account_info.nonce.saturating_add(1);
 
                     new_account_info.balance = new_account_balance;
                     new_state.insert(
@@ -773,6 +777,7 @@ mod evm {
                         output: Output::Call(Bytes::new()),
                     }
                 }
+                f(&execution_result);
 
                 self.system_call_receipts.push(self.receipt_builder.build_receipt(
                     ReceiptBuilderCtx {

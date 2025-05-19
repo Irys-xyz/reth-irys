@@ -21,6 +21,7 @@ alloy-rpc-types-eth.workspace = true
 alloy-eips.workspace = true
 alloy-evm.workspace = true
 alloy-dyn-abi.workspace = true
+alloy-rlp.workspace = true
 alloy-consensus.workspace = true
 alloy-network.workspace = true
 reth.workspace = true
@@ -37,6 +38,8 @@ serde.workspace = true
 futures.workspace = true
 tracing.workspace = true
 serde_json.workspace = true
+arbitrary.workspace = true
+bytes.workspace = true
 
 [lints]
 # workspace = true

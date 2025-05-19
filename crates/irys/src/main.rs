@@ -9,7 +9,10 @@ use alloy_eips::{eip7840::BlobParams, merge::EPOCH_SLOTS, Encodable2718};
 use alloy_genesis::Genesis;
 use alloy_network::{EthereumWallet, NetworkWallet};
 use alloy_primitives::{keccak256, Address, Bytes, Log, LogData, Signature, TxKind, B256, U256};
+use alloy_rlp::{Decodable, Encodable, Error as RlpError, Result as RlpResult};
+use alloy_rlp::{RlpDecodable, RlpDecodableWrapper, RlpEncodable, RlpEncodableWrapper};
 use alloy_rpc_types::{engine::PayloadAttributes, TransactionInput, TransactionRequest};
+use bytes::BytesMut;
 use evm::{CustomBlockAssembler, MyEthEvmFactory};
 use futures::StreamExt;
 use reth::{
@@ -67,7 +70,7 @@ pub(crate) fn eth_payload_attributes(timestamp: u64) -> EthPayloadBuilderAttribu
     EthPayloadBuilderAttributes::new(B256::ZERO, attributes)
 }
 
-#[derive(serde::Deserialize, serde::Serialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, arbitrary::Arbitrary)]
 enum SystemTransaction {
     ReleaseStake(BalanceIncrement),
     BlockReward(BalanceIncrement),
@@ -75,13 +78,114 @@ enum SystemTransaction {
     StorageFees(BalanceDecrement),
 }
 
-#[derive(serde::Deserialize, serde::Serialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+/// Stable 1-byte discriminants
+const RELEASE_STAKE_ID: u8 = 0x00;
+const BLOCK_REWARD_ID: u8 = 0x01;
+const STAKE_ID: u8 = 0x02;
+const STORAGE_FEES_ID: u8 = 0x03;
+
+impl Encodable for SystemTransaction {
+    fn encode(&self, out: &mut dyn bytes::BufMut) {
+        match self {
+            SystemTransaction::ReleaseStake(bi) => {
+                out.put_u8(RELEASE_STAKE_ID);
+                bi.encode(out);
+            }
+            SystemTransaction::BlockReward(bi) => {
+                out.put_u8(BLOCK_REWARD_ID);
+                bi.encode(out);
+            }
+            SystemTransaction::Stake(bd) => {
+                out.put_u8(STAKE_ID);
+                bd.encode(out);
+            }
+            SystemTransaction::StorageFees(bd) => {
+                out.put_u8(STORAGE_FEES_ID);
+                bd.encode(out);
+            }
+        }
+    }
+
+    fn length(&self) -> usize {
+        1 + match self {
+            SystemTransaction::ReleaseStake(bi) => bi.length(),
+            SystemTransaction::BlockReward(bi) => bi.length(),
+            SystemTransaction::Stake(bd) => bd.length(),
+            SystemTransaction::StorageFees(bd) => bd.length(),
+        }
+    }
+}
+
+impl Decodable for SystemTransaction {
+    fn decode(buf: &mut &[u8]) -> RlpResult<Self> {
+        if buf.is_empty() {
+            return Err(RlpError::InputTooShort);
+        }
+
+        let disc = buf[0];
+        *buf = &buf[1..]; // advance past the discriminant byte
+
+        match disc {
+            RELEASE_STAKE_ID => {
+                let inner = BalanceIncrement::decode(buf)?;
+                Ok(SystemTransaction::ReleaseStake(inner))
+            }
+            BLOCK_REWARD_ID => {
+                let inner = BalanceIncrement::decode(buf)?;
+                Ok(SystemTransaction::BlockReward(inner))
+            }
+            STAKE_ID => {
+                let inner = BalanceDecrement::decode(buf)?;
+                Ok(SystemTransaction::Stake(inner))
+            }
+            STORAGE_FEES_ID => {
+                let inner = BalanceDecrement::decode(buf)?;
+                Ok(SystemTransaction::StorageFees(inner))
+            }
+            _ => Err(RlpError::Custom("invalid system-transaction discriminant")),
+        }
+    }
+}
+
+impl Default for SystemTransaction {
+    fn default() -> Self {
+        unimplemented!("relying on the default impl for `SYSTEM_TX` is a critical bug")
+    }
+}
+
+#[derive(
+    serde::Deserialize,
+    serde::Serialize,
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Default,
+    RlpEncodable,
+    RlpDecodable,
+    arbitrary::Arbitrary,
+)]
 struct BalanceDecrement {
     amount: U256,
     target: Address,
 }
 
-#[derive(serde::Deserialize, serde::Serialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(
+    serde::Deserialize,
+    serde::Serialize,
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Default,
+    RlpEncodable,
+    RlpDecodable,
+    arbitrary::Arbitrary,
+)]
 struct BalanceIncrement {
     amount: U256,
     target: Address,
@@ -93,6 +197,8 @@ struct BalanceIncrement {
 // todo: write tests
 // todo: see how 2 nodes behave
 // todo exepriments how to prevent user from producing system tx -- maybe we can access the block producer address
+// todo: custom mempool - don't drop system txs if they dont have gas properties
+// todo: custom mempool - after each block, drop all system txs
 
 #[tokio::main]
 async fn main() -> eyre::Result<()> {
@@ -175,6 +281,12 @@ async fn main() -> eyre::Result<()> {
             tracing::info!(?signer_a_address, ?signer_a_balance, "Signer A balance");
             {
                 // submit a valid tx
+                let mut system_tx_rlp = Vec::with_capacity(512);
+                SystemTransaction::StorageFees(BalanceDecrement {
+                    amount: U256::ONE,
+                    target: signer_a.address(),
+                })
+                .encode(&mut system_tx_rlp);
                 let tx_raw = TxLegacy {
                     gas_limit: 99000,
                     value: U256::ZERO,
@@ -182,12 +294,7 @@ async fn main() -> eyre::Result<()> {
                     gas_price: 1_000_000_000u128, // 1 Gwei
                     chain_id: Some(1),
                     to: TxKind::Call(Address::ZERO),
-                    input: serde_json::to_vec(&SystemTransaction::StorageFees(BalanceDecrement {
-                        amount: U256::ONE,
-                        target: signer_a.address(),
-                    }))
-                    .unwrap()
-                    .into(),
+                    input: system_tx_rlp.into(),
                     ..Default::default()
                 };
                 let pooled_tx = sign_tx(tx_raw, &signer_b).await;
@@ -463,6 +570,7 @@ impl<N: FullNodeComponents<Types = Self>> DebugNode<N> for IrysEthereumNode {
 #[non_exhaustive]
 pub struct CustomPoolBuilder;
 
+// todo add a link form where this code was copied from
 /// Implement the [`PoolBuilder`] trait for the custom pool builder
 ///
 /// This will be used to build the transaction pool and its maintenance tasks during launch.
@@ -597,8 +705,9 @@ where
         transaction: &Self::Transaction,
         base_fee: u64,
     ) -> Priority<Self::PriorityValue> {
-        let bytes = transaction.input();
-        if let Ok(_decrement_tx) = serde_json::from_slice::<BalanceDecrement>(bytes.as_ref()) {
+        let tx_envelope_input_buf = transaction.input();
+        let rlp_decoded_system_tx = SystemTransaction::decode(&mut &tx_envelope_input_buf[..]);
+        if rlp_decoded_system_tx.is_ok() {
             return Priority::Value(U256::MAX);
         }
         transaction.effective_tip_per_gas(base_fee).map(U256::from).into()
@@ -712,10 +821,11 @@ mod evm {
             tx: impl ExecutableTx<Self>,
             f: impl FnOnce(&ExecutionResult<<Self::Evm as Evm>::HaltReason>),
         ) -> Result<u64, BlockExecutionError> {
-            let aa = tx.tx();
+            let tx_envelope = tx.tx();
 
-            if let Ok(system_tx) = serde_json::from_slice::<SystemTransaction>(aa.input().as_ref())
-            {
+            let tx_envelope_input_buf = tx_envelope.input();
+            let rlp_decoded_system_tx = SystemTransaction::decode(&mut &tx_envelope_input_buf[..]);
+            if let Ok(system_tx) = rlp_decoded_system_tx {
                 // handle the signer nonce incerment
                 {
                     let evm = self.inner.evm_mut();
@@ -727,7 +837,7 @@ mod evm {
                             tracing::warn!("signer account does not exist");
                             return Err(BlockExecutionError::Validation(
                                 BlockValidationError::InvalidTx {
-                                    hash: *aa.hash(),
+                                    hash: *tx_envelope.hash(),
                                     // todo is there a more appropriate error to use?
                                     error: Box::new(
                                         InvalidTransaction::OverflowPaymentInTransaction,
@@ -742,7 +852,7 @@ mod evm {
                             .map(|(k, v)| (*k, EvmStorageSlot::new(*v)))
                             .collect();
                         let mut new_account_info = plain_account.info.clone();
-                        new_account_info.set_nonce(aa.nonce() + 1);
+                        new_account_info.set_nonce(tx_envelope.nonce() + 1);
 
                         new_state.insert(
                             *signer,
@@ -765,7 +875,7 @@ mod evm {
                     SystemTransaction::Stake(balance_decrement) => unimplemented!(),
                     SystemTransaction::StorageFees(balance_decrement) => {
                         let state = db.load_cache_account(balance_decrement.target).unwrap();
-                        let hash = *aa.hash();
+                        let hash = *tx_envelope.hash();
                         tracing::error!("special tx {:}", hash);
 
                         // handle a case when an account has never existed (0 balance, no data stored on it)
@@ -774,7 +884,7 @@ mod evm {
                             tracing::warn!("account does not exist");
                             return Err(BlockExecutionError::Validation(
                                 BlockValidationError::InvalidTx {
-                                    hash: *aa.hash(),
+                                    hash: *tx_envelope.hash(),
                                     // todo is there a more appropriate error to use?
                                     error: Box::new(
                                         InvalidTransaction::OverflowPaymentInTransaction,

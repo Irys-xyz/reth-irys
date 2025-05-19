@@ -67,10 +67,23 @@ pub(crate) fn eth_payload_attributes(timestamp: u64) -> EthPayloadBuilderAttribu
     EthPayloadBuilderAttributes::new(B256::ZERO, attributes)
 }
 
-// todo make this into EIP-712 structured data, domain separators, etc
-#[derive(serde::Deserialize, serde::Serialize, Debug)]
+#[derive(serde::Deserialize, serde::Serialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum SystemTransaction {
+    ReleaseStake(BalanceIncrement),
+    BlockReward(BalanceIncrement),
+    Stake(BalanceDecrement),
+    StorageFees(BalanceDecrement),
+}
+
+#[derive(serde::Deserialize, serde::Serialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct BalanceDecrement {
-    amount_to_decrement_by: U256,
+    amount: U256,
+    target: Address,
+}
+
+#[derive(serde::Deserialize, serde::Serialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct BalanceIncrement {
+    amount: U256,
     target: Address,
 }
 
@@ -79,6 +92,7 @@ struct BalanceDecrement {
 // todo: nonce update
 // todo: write tests
 // todo: see how 2 nodes behave
+// todo exepriments how to prevent user from producing system tx -- maybe we can access the block producer address
 
 #[tokio::main]
 async fn main() -> eyre::Result<()> {
@@ -168,20 +182,10 @@ async fn main() -> eyre::Result<()> {
                     gas_price: 1_000_000_000u128, // 1 Gwei
                     chain_id: Some(1),
                     to: TxKind::Call(Address::ZERO),
-                    input: serde_json::to_vec(&BalanceDecrement {
-                        amount_to_decrement_by: {
-                            // every second "decrement tx" will fail
-                            // if nonce % 2 == 1 {
-                            //     tracing::warn!("max");
-                            //     U256::MAX
-                            // } else {
-                            //     tracing::warn!("one");
-                            //     U256::ONE
-                            // }
-                            U256::ONE
-                        },
+                    input: serde_json::to_vec(&SystemTransaction::StorageFees(BalanceDecrement {
+                        amount: U256::ONE,
                         target: signer_a.address(),
-                    })
+                    }))
                     .unwrap()
                     .into(),
                     ..Default::default()
@@ -710,10 +714,7 @@ mod evm {
         ) -> Result<u64, BlockExecutionError> {
             let aa = tx.tx();
 
-            if let Ok(decrement_tx) =
-                // todo exepriments how to prevent user from producing this
-                // todo can we get the block producer here
-                serde_json::from_slice::<BalanceDecrement>(aa.input().as_ref())
+            if let Ok(system_tx) = serde_json::from_slice::<SystemTransaction>(aa.input().as_ref())
             {
                 // handle the signer nonce incerment
                 {
@@ -721,10 +722,9 @@ mod evm {
                     let db = evm.db_mut();
                     {
                         let signer = tx.signer();
-                        dbg!(&signer);
                         let state = db.load_cache_account(*signer).unwrap();
                         let Some(plain_account) = state.account.as_ref() else {
-                            tracing::warn!("account does not exist");
+                            tracing::warn!("signer account does not exist");
                             return Err(BlockExecutionError::Validation(
                                 BlockValidationError::InvalidTx {
                                     hash: *aa.hash(),
@@ -759,89 +759,100 @@ mod evm {
                 let evm = self.inner.evm_mut();
                 let db = evm.db_mut();
 
-                let state = db.load_cache_account(decrement_tx.target).unwrap();
-                let hash = *aa.hash();
-                tracing::error!("special tx {:}", hash);
+                match system_tx {
+                    SystemTransaction::ReleaseStake(balance_increment) => unimplemented!(),
+                    SystemTransaction::BlockReward(balance_increment) => unimplemented!(),
+                    SystemTransaction::Stake(balance_decrement) => unimplemented!(),
+                    SystemTransaction::StorageFees(balance_decrement) => {
+                        let state = db.load_cache_account(balance_decrement.target).unwrap();
+                        let hash = *aa.hash();
+                        tracing::error!("special tx {:}", hash);
 
-                // handle a case when an account has never existed (0 balance, no data stored on it)
-                // We don't even create a receipt in this case (eth does the same with native txs)
-                let Some(plain_account) = state.account.as_ref() else {
-                    tracing::warn!("account does not exist");
-                    return Err(BlockExecutionError::Validation(BlockValidationError::InvalidTx {
-                        hash: *aa.hash(),
-                        // todo is there a more appropriate error to use?
-                        error: Box::new(InvalidTransaction::OverflowPaymentInTransaction),
-                    }));
-                };
+                        // handle a case when an account has never existed (0 balance, no data stored on it)
+                        // We don't even create a receipt in this case (eth does the same with native txs)
+                        let Some(plain_account) = state.account.as_ref() else {
+                            tracing::warn!("account does not exist");
+                            return Err(BlockExecutionError::Validation(
+                                BlockValidationError::InvalidTx {
+                                    hash: *aa.hash(),
+                                    // todo is there a more appropriate error to use?
+                                    error: Box::new(
+                                        InvalidTransaction::OverflowPaymentInTransaction,
+                                    ),
+                                },
+                            ));
+                        };
 
-                // handle a case where the balance of the user is too low
-                let mut new_state = alloy_primitives::map::foldhash::HashMap::default();
-                let execution_result;
-                if plain_account.info.balance < decrement_tx.amount_to_decrement_by {
-                    tracing::warn!(?plain_account.info.balance, ?decrement_tx.amount_to_decrement_by);
-                    execution_result =
-                        ExecutionResult::Revert { gas_used: 0, output: Bytes::new() };
-                } else {
-                    // Create new account info with updated balance
-                    let new_account_balance =
-                        plain_account.info.balance - decrement_tx.amount_to_decrement_by;
-                    let storage = plain_account
-                        .storage
-                        .iter()
-                        .map(|(k, v)| (*k, EvmStorageSlot::new(*v)))
-                        .collect();
-                    let mut new_account_info = plain_account.info.clone();
+                        // handle a case where the balance of the user is too low
+                        let mut new_state = alloy_primitives::map::foldhash::HashMap::default();
+                        let execution_result;
+                        if plain_account.info.balance < balance_decrement.amount {
+                            tracing::warn!(?plain_account.info.balance, ?balance_decrement.amount);
+                            execution_result =
+                                ExecutionResult::Revert { gas_used: 0, output: Bytes::new() };
+                        } else {
+                            // Create new account info with updated balance
+                            let new_account_balance =
+                                plain_account.info.balance - balance_decrement.amount;
+                            let storage = plain_account
+                                .storage
+                                .iter()
+                                .map(|(k, v)| (*k, EvmStorageSlot::new(*v)))
+                                .collect();
+                            let mut new_account_info = plain_account.info.clone();
 
-                    new_account_info.balance = new_account_balance;
-                    new_state.insert(
-                        decrement_tx.target,
-                        Account {
-                            info: new_account_info,
-                            storage,
-                            status: revm::state::AccountStatus::Touched,
-                        },
-                    );
+                            new_account_info.balance = new_account_balance;
+                            new_state.insert(
+                                balance_decrement.target,
+                                Account {
+                                    info: new_account_info,
+                                    storage,
+                                    status: revm::state::AccountStatus::Touched,
+                                },
+                            );
 
-                    // generate logs to attach to the receipt
-                    let param_values = DynSolValue::Tuple(vec![
-                        DynSolValue::Uint(decrement_tx.amount_to_decrement_by, 256),
-                        DynSolValue::Address(decrement_tx.target),
-                    ]);
-                    let encoded_data = param_values.abi_encode();
-                    let log = Log {
-                        address: decrement_tx.target,
-                        data: LogData::new(
-                            vec![keccak256("SYSTEM_TX_DECREMENT_BALANCE")],
-                            encoded_data.into(),
-                        )
-                        .unwrap(),
-                    };
-                    execution_result = ExecutionResult::Success {
-                        reason: revm::context::result::SuccessReason::Return,
-                        gas_used: 0,
-                        gas_refunded: 0,
-                        logs: vec![log],
-                        output: Output::Call(Bytes::new()),
+                            // generate logs to attach to the receipt
+                            let param_values = DynSolValue::Tuple(vec![
+                                DynSolValue::Uint(balance_decrement.amount, 256),
+                                DynSolValue::Address(balance_decrement.target),
+                            ]);
+                            let encoded_data = param_values.abi_encode();
+                            let log = Log {
+                                address: balance_decrement.target,
+                                data: LogData::new(
+                                    vec![keccak256("SYSTEM_TX_DECREMENT_BALANCE")],
+                                    encoded_data.into(),
+                                )
+                                .unwrap(),
+                            };
+                            execution_result = ExecutionResult::Success {
+                                reason: revm::context::result::SuccessReason::Return,
+                                gas_used: 0,
+                                gas_refunded: 0,
+                                logs: vec![log],
+                                output: Output::Call(Bytes::new()),
+                            }
+                        }
+                        f(&execution_result);
+
+                        self.system_call_receipts.push(self.receipt_builder.build_receipt(
+                            ReceiptBuilderCtx {
+                                tx: tx.tx(),
+                                evm,
+                                result: execution_result,
+                                state: &new_state,
+                                // cumulative gas used is 0 because system txs are always executed at the beginning of the block, and use 0 gas
+                                cumulative_gas_used: 0,
+                            },
+                        ));
+
+                        // Commit the changes to the database
+                        let evm = self.inner.evm_mut();
+                        let db = evm.db_mut();
+                        // todo test revert
+                        db.commit(new_state);
                     }
                 }
-                f(&execution_result);
-
-                self.system_call_receipts.push(self.receipt_builder.build_receipt(
-                    ReceiptBuilderCtx {
-                        tx: tx.tx(),
-                        evm,
-                        result: execution_result,
-                        state: &new_state,
-                        // cumulative gas used is 0 because system txs are always executed at the beginning of the block, and use 0 gas
-                        cumulative_gas_used: 0,
-                    },
-                ));
-
-                // Commit the changes to the database
-                let evm = self.inner.evm_mut();
-                let db = evm.db_mut();
-                // todo test revert
-                db.commit(new_state);
 
                 Ok(0)
             } else {

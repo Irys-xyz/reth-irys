@@ -8026,6 +8026,7 @@ dependencies = [
  "modular-bitfield",
  "op-alloy-consensus",
  "parity-scale-codec",
+ "paste",
  "proptest",
  "proptest-arbitrary-interop",
  "rand 0.9.2",

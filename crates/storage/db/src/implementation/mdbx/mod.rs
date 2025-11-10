@@ -14,6 +14,7 @@ use reth_db_api::{
     database::Database,
     database_metrics::DatabaseMetrics,
     models::ClientVersion,
+    table::TableInfo,
     transaction::{DbTx, DbTxMut},
 };
 use reth_libmdbx::{
@@ -198,6 +199,13 @@ impl DatabaseArguments {
         self
     }
 
+    /// Sets the "shrink threshold" for the database (how much free space it'll allow before
+    /// shrinking it's FS footprint)
+    pub const fn with_shrink_threshold(mut self, shrink_threshold: isize) -> Self {
+        self.geometry.shrink_threshold = Some(shrink_threshold);
+        self
+    }
+
     /// Set the log level.
     pub const fn with_log_level(mut self, log_level: Option<LogLevel>) -> Self {
         self.log_level = log_level;
@@ -253,7 +261,7 @@ pub struct DatabaseEnv {
     /// at startup.
     dbis: Arc<HashMap<&'static str, ffi::MDBX_dbi>>,
     /// Cache for metric handles. If `None`, metrics are not recorded.
-    metrics: Option<Arc<DatabaseEnvMetrics>>,
+    pub metrics: Option<Arc<DatabaseEnvMetrics>>,
     /// Write lock for when dealing with a read-write environment.
     _lock_file: Option<StorageLock>,
 }

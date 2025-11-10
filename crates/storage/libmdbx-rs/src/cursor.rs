@@ -428,6 +428,15 @@ where
         };
         Iter::new(self, ffi::MDBX_GET_CURRENT, ffi::MDBX_NEXT_DUP)
     }
+
+    /// get the number of dupsort values associated with the current key
+    pub fn get_dup_count(&self) -> Result<u32> {
+        let mut count: usize = 0;
+        unsafe {
+            let _v = mdbx_result(ffi::mdbx_cursor_count(self.cursor, &mut count))?;
+        }
+        Ok(count as u32)
+    }
 }
 
 impl Cursor<RW> {

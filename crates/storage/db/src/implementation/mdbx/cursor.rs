@@ -26,7 +26,7 @@ pub type CursorRW<T> = Cursor<RW, T>;
 #[derive(Debug)]
 pub struct Cursor<K: TransactionKind, T: Table> {
     /// Inner `libmdbx` cursor.
-    pub(crate) inner: reth_libmdbx::Cursor<K>,
+    pub inner: reth_libmdbx::Cursor<K>,
     /// Cache buffer that receives compressed values.
     buf: Vec<u8>,
     /// Reference to metric handles in the DB environment. If `None`, metrics are not recorded.

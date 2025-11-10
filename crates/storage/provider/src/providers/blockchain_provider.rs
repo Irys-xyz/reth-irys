@@ -46,7 +46,7 @@ use tracing::trace;
 #[derive(Debug)]
 pub struct BlockchainProvider<N: NodeTypesWithDB> {
     /// Provider factory used to access the database.
-    pub(crate) database: ProviderFactory<N>,
+    pub database: ProviderFactory<N>,
     /// Tracks the chain info wrt forkchoice updates and in memory canonical
     /// state.
     pub(crate) canonical_in_memory_state: CanonicalInMemoryState<N::Primitives>,

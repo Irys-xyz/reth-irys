@@ -197,6 +197,8 @@ pub fn get_bit_size(ftype: &str) -> u8 {
         // IRYS MODIFICATIONS
         "u32" | "i32" => 3,
         "u8" => 1,
+        "UnixTimestamp" => 4,   // wraps u64, fixed 8-byte encoding (needs 4 bits for len 0-8)
+        "UnixTimestampMs" => 5, // wraps u128, delegates to native u128 Compact (needs 5 bits for len 0-16)
 
         _ => 0,
     }

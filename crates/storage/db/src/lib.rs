@@ -18,7 +18,7 @@
 mod implementation;
 pub mod lockfile;
 #[cfg(feature = "mdbx")]
-mod metrics;
+pub mod metrics;
 pub mod static_file;
 #[cfg(feature = "mdbx")]
 mod utils;

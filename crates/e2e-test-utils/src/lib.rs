@@ -26,16 +26,16 @@ pub mod transaction;
 pub mod wallet;
 
 /// Helper for payload operations
-mod payload;
+pub mod payload;
 
 /// Helper for setting up nodes with pre-imported chain data
 pub mod setup_import;
 
 /// Helper for network operations
-mod network;
+pub mod network;
 
 /// Helper for rpc operations
-mod rpc;
+pub mod rpc;
 
 /// Utilities for creating and writing RLP test data
 pub mod test_rlp_utils;

@@ -9,10 +9,10 @@ use tokio_stream::wrappers::BroadcastStream;
 #[derive(derive_more::Debug)]
 pub struct PayloadTestContext<T: PayloadTypes> {
     pub payload_event_stream: BroadcastStream<Events<T>>,
-    payload_builder: PayloadBuilderHandle<T>,
+    pub payload_builder: PayloadBuilderHandle<T>,
     pub timestamp: u64,
     #[debug(skip)]
-    attributes_generator: Box<dyn Fn(u64) -> T::PayloadBuilderAttributes + Send + Sync>,
+    pub attributes_generator: Box<dyn Fn(u64) -> T::PayloadBuilderAttributes + Send + Sync>,
 }
 
 impl<T: PayloadTypes> PayloadTestContext<T> {

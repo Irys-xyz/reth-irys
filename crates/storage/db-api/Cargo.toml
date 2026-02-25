@@ -43,6 +43,7 @@ metrics.workspace = true
 arrayvec.workspace = true
 derive_more.workspace = true
 bytes.workspace = true
+paste.workspace = true
 
 # arbitrary utils
 arbitrary = { workspace = true, features = ["derive"], optional = true }

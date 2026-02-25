@@ -30,7 +30,7 @@ use tracing::info;
 #[derive(Debug, Parser)]
 pub struct Command<C: ChainSpecParser> {
     #[command(flatten)]
-    env: EnvironmentArgs<C>,
+    pub env: EnvironmentArgs<C>,
 
     #[command(subcommand)]
     command: Subcommands,

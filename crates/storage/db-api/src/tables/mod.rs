@@ -16,6 +16,8 @@ pub mod codecs;
 mod raw;
 pub use raw::{RawDupSort, RawKey, RawTable, RawValue, TableRawRow};
 
+use paste::paste;
+
 use crate::{
     models::{
         accounts::BlockNumberAddress,
@@ -127,7 +129,7 @@ macro_rules! tables {
         concat!("`", stringify!($value), "`")
     };
 
-    ($($(#[$attr:meta])* table $name:ident$(<$($generic:ident $(= $default:ty)?),*>)? { type Key = $key:ty; type Value = $value:ty; $(type SubKey = $subkey:ty;)? } )*) => {
+    ($enum_name:ident; $($(#[$attr:meta])* table $name:ident$(<$($generic:ident $(= $default:ty)?),*>)? { type Key = $key:ty; type Value = $value:ty; $(type SubKey = $subkey:ty;)? } )*) => {
         // Table marker types.
         $(
             $(#[$attr])*
@@ -171,14 +173,14 @@ macro_rules! tables {
 
         /// A table in the database.
         #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-        pub enum Tables {
+        pub enum $enum_name {
             $(
                 #[doc = concat!("The [`", stringify!($name), "`] database table.")]
                 $name,
             )*
         }
 
-        impl Tables {
+        impl $enum_name {
             /// All the tables in the database.
             pub const ALL: &'static [Self] = &[$(Self::$name,)*];
 
@@ -225,21 +227,21 @@ macro_rules! tables {
             }
         }
 
-        impl fmt::Debug for Tables {
+        impl fmt::Debug for $enum_name {
             #[inline]
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
                 f.write_str(self.name())
             }
         }
 
-        impl fmt::Display for Tables {
+        impl fmt::Display for $enum_name {
             #[inline]
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
                 self.name().fmt(f)
             }
         }
 
-        impl std::str::FromStr for Tables {
+        impl std::str::FromStr for $enum_name {
             type Err = String;
 
             fn from_str(s: &str) -> Result<Self, Self::Err> {
@@ -252,7 +254,7 @@ macro_rules! tables {
             }
         }
 
-        impl TableInfo for Tables {
+        impl TableInfo for $enum_name {
             fn name(&self) -> &'static str {
                 self.name()
             }
@@ -262,7 +264,7 @@ macro_rules! tables {
             }
         }
 
-        impl TableSet for Tables {
+        impl TableSet for $enum_name {
             fn tables() -> Box<dyn Iterator<Item = Box<dyn TableInfo>>> {
                 Box::new(Self::ALL.iter().map(|table| Box::new(*table) as Box<dyn TableInfo>))
             }
@@ -276,6 +278,8 @@ macro_rules! tables {
             )*
         }
 
+
+        paste! {
         /// Maps a run-time [`Tables`] enum value to its corresponding compile-time [`Table`] type.
         ///
         /// This is a simpler alternative to [`TableViewer`].
@@ -289,23 +293,25 @@ macro_rules! tables {
         /// let result = tables_to_generic!(table, |GenericTable| <GenericTable as Table>::NAME);
         /// assert_eq!(result, table.name());
         /// ```
-        #[macro_export]
-        macro_rules! tables_to_generic {
-            ($table:expr, |$generic_name:ident| $e:expr) => {
-                match $table {
-                    $(
-                        Tables::$name => {
-                            use $crate::tables::$name as $generic_name;
-                            $e
-                        },
-                    )*
-                }
-            };
-        }
+            #[macro_export]
+            macro_rules! [<$enum_name:snake _to_generic>] {
+                ($table:expr, |$generic_name:ident| $e:expr) => {
+                    match $table {
+                        $(
+                            Tables::$name => {
+                                use $crate::tables::$name as $generic_name;
+                                $e
+                            },
+                        )*
+                    }
+                };
+            }
+    }
     };
 }
 
 tables! {
+    Tables;
     /// Stores the header hashes belonging to the canonical chain.
     table CanonicalHeaders {
         type Key = BlockNumber;

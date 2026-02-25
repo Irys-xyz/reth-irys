@@ -62,7 +62,7 @@ use std::{
     },
     time::Duration,
 };
-use tracing::{debug, debug_span, error, instrument, trace};
+use tracing::{debug, debug_span, error, instrument, trace, warn};
 
 #[cfg(feature = "metrics")]
 use crate::proof_task_metrics::{
@@ -138,6 +138,17 @@ impl ProofWorkerHandle {
             + Sync
             + 'static,
     {
+        // Pre-initialize provider on this non-rayon thread before spawning workers.
+        // For overlay-backed factories this resolves lazy overlays up front so worker-local
+        // `database_provider_ro()` calls on rayon threads don't perform lazy resolution.
+        if let Err(error) = task_ctx.factory.database_provider_ro() {
+            warn!(
+                target: "trie::proof_task",
+                ?error,
+                "Failed to pre-initialize proof worker provider before worker spawn"
+            );
+        }
+
         let (storage_work_tx, storage_work_rx) = unbounded::<StorageWorkerJob>();
         let (account_work_tx, account_work_rx) = unbounded::<AccountWorkerJob>();
 
